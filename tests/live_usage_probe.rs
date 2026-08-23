@@ -1,5 +1,6 @@
 #[cfg(windows)]
 #[test]
+#[ignore = "live probe: needs a real user profile with UserAssist history"]
 fn live_userassist_probe_returns_entries() {
     use sweep::domain::traits::UsageProbe;
     let probe = sweep::infra::win::userassist::UserAssistProbe::new();

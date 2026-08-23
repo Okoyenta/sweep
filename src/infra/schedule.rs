@@ -75,7 +75,8 @@ pub mod unix_impl {
             .arg("-l")
             .output()
             .map_err(|e| anyhow::anyhow!("reading crontab failed: {e}"))?;
-        let kept: Vec<&str> = String::from_utf8_lossy(&existing.stdout)
+        let stdout = String::from_utf8_lossy(&existing.stdout);
+        let kept: Vec<&str> = stdout
             .lines()
             .filter(|l| !l.contains(CRON_MARKER))
             .collect();
