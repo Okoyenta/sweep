@@ -190,8 +190,11 @@ Exec=firefox --new-window %u
 
         let inv = DesktopFileInventory::with_dirs(vec![base.clone()]);
         let apps = inv.installed_apps().unwrap();
-        let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "Bravo"]);
+        // which of the Alpha/alpha duplicates survives depends on
+        // filesystem read order, so compare case-insensitively
+        let mut lowered: Vec<String> = apps.iter().map(|a| a.name.to_lowercase()).collect();
+        lowered.sort();
+        assert_eq!(lowered, vec!["alpha", "bravo"]);
         let _ = fs::remove_dir_all(&base);
     }
 }
