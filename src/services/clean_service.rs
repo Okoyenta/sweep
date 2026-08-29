@@ -46,6 +46,7 @@ impl<R: PathRemover> CleanService<R> {
                     files,
                     total_bytes,
                     items,
+                    cleanup_command: cat.cleanup_command.clone(),
                 }
             })
             .collect()
@@ -59,9 +60,33 @@ impl<R: PathRemover> CleanService<R> {
         let mut outcome = CleanOutcome::default();
         for scan in scans {
             if let Some(ids) = only {
-                if !ids.iter().any(|id| id == &scan.category_id) {
+                if ids.is_empty() {
+                    // empty vec = clean all, same as None
+                } else if !ids.iter().any(|id| id == &scan.category_id) {
                     continue;
                 }
+            }
+            if let Some(ref cmd) = scan.cleanup_command {
+                let status = if cfg!(windows) {
+                    std::process::Command::new("cmd")
+                        .args(["/C", cmd])
+                        .status()
+                } else {
+                    std::process::Command::new("sh")
+                        .args(["-c", cmd])
+                        .status()
+                };
+                match status {
+                    Ok(st) if st.success() => {
+                        outcome.removed_items += 1;
+                        outcome.removed_bytes += scan.total_bytes;
+                    }
+                    _ => {
+                        outcome.failed_items += scan.items.len() as u64;
+                        outcome.failed_paths.extend(scan.items.iter().cloned());
+                    }
+                }
+                continue;
             }
             for item in &scan.items {
                 let (bytes, _files) = measure(item);
@@ -72,6 +97,7 @@ impl<R: PathRemover> CleanService<R> {
                     }
                     Err(_) => {
                         outcome.failed_items += 1;
+                        outcome.failed_paths.push(item.clone());
                     }
                 }
             }
@@ -148,6 +174,8 @@ mod tests {
             id: "t".into(),
             title: "test".into(),
             roots: vec![base.clone()],
+            risk: crate::domain::models::RiskLevel::Safe,
+            cleanup_command: None,
         }];
         let svc = CleanService::new(CountingRemover(AtomicUsize::new(0)));
         let scans = svc.scan(&cats);
@@ -168,6 +196,7 @@ mod tests {
                 items: vec![a.join("a.bin")],
                 total_bytes: 100,
                 files: 1,
+                cleanup_command: None,
             },
             CategoryScan {
                 category_id: "do".into(),
@@ -175,6 +204,7 @@ mod tests {
                 items: vec![b.join("ok.bin"), b.join("locked.bin")],
                 total_bytes: 0,
                 files: 2,
+                cleanup_command: None,
             },
         ];
         let remover = RecordingRemover {
@@ -186,6 +216,7 @@ mod tests {
 
         assert_eq!(out.removed_items, 1);
         assert_eq!(out.failed_items, 1);
+        assert_eq!(out.failed_paths, vec![b.join("locked.bin")]);
         let _ = fs::remove_dir_all(&a);
         let _ = fs::remove_dir_all(&b);
     }
@@ -196,6 +227,8 @@ mod tests {
             id: "ghost".into(),
             title: "g".into(),
             roots: vec![std::env::temp_dir().join("sweep-does-not-exist-xyz")],
+            risk: crate::domain::models::RiskLevel::Safe,
+            cleanup_command: None,
         }];
         let svc = CleanService::new(CountingRemover(AtomicUsize::new(0)));
         let scans = svc.scan(&cats);

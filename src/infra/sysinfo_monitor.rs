@@ -1,7 +1,7 @@
 use sysinfo::{Disks, ProcessesToUpdate, System};
 
 use crate::domain::models::{DiskStats, MemoryStats, ProcessMemInfo, SystemSnapshot};
-use crate::domain::traits::SystemMonitor;
+use crate::domain::traits::{GuardMonitor, SystemMonitor};
 
 const TOP_PROCESSES: usize = 10;
 
@@ -70,10 +70,16 @@ impl SystemMonitor for SysinfoMonitor {
             .system
             .processes()
             .iter()
-            .map(|(pid, proc)| ProcessMemInfo {
-                pid: pid.as_u32(),
-                name: proc.name().to_string_lossy().into_owned(),
-                memory_bytes: proc.memory(),
+            .map(|(pid, proc)| {
+                let disk = proc.disk_usage();
+                ProcessMemInfo {
+                    pid: pid.as_u32(),
+                    name: proc.name().to_string_lossy().into_owned(),
+                    memory_bytes: proc.memory(),
+                    read_bytes: disk.read_bytes,
+                    write_bytes: disk.written_bytes,
+                    total_written_bytes: disk.total_written_bytes,
+                }
             })
             .collect();
         processes.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes).then(a.pid.cmp(&b.pid)));
@@ -83,6 +89,42 @@ impl SystemMonitor for SysinfoMonitor {
             memory,
             disks,
             top_processes: processes,
+        })
+    }
+}
+
+impl GuardMonitor for SysinfoMonitor {
+    fn snapshot_ram(&self) -> anyhow::Result<crate::domain::models::RamSnapshot> {
+        let used = self.system.used_memory();
+        let total = self.system.total_memory();
+        let available = self.system.available_memory();
+        let used_pct = if total > 0 {
+            used as f64 / total as f64
+        } else {
+            0.0
+        };
+        Ok(crate::domain::models::RamSnapshot {
+            timestamp_secs: chrono::Utc::now().timestamp(),
+            used_bytes: used,
+            total_bytes: total,
+            available_bytes: available,
+            used_pct,
+        })
+    }
+
+    fn snapshot_disk(&self) -> anyhow::Result<crate::domain::models::DiskSnapshot> {
+        let free = crate::infra::paths::free_bytes_on_index_volume();
+        let total = self
+            .disks
+            .list()
+            .iter()
+            .map(|d| d.total_space())
+            .max()
+            .unwrap_or(0);
+        Ok(crate::domain::models::DiskSnapshot {
+            timestamp_secs: chrono::Utc::now().timestamp(),
+            free_bytes: free,
+            total_bytes: total,
         })
     }
 }

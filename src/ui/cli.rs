@@ -40,6 +40,12 @@ pub enum Command {
         only: Vec<String>,
         #[arg(short, long)]
         yes: bool,
+        #[arg(long)]
+        deep: bool,
+        #[arg(long)]
+        stop_services: bool,
+        #[arg(long)]
+        kill: bool,
     },
     Ram {
         #[arg(short, long)]
@@ -65,6 +71,10 @@ pub enum Command {
         #[arg(short, long)]
         yes: bool,
     },
+    Diagnose {
+        #[arg(long)]
+        deep: bool,
+    },
     Schedule {
         #[arg(long)]
         install: bool,
@@ -72,5 +82,35 @@ pub enum Command {
         remove: bool,
         #[arg(long)]
         status: bool,
+        #[arg(long)]
+        guard_install: bool,
+        #[arg(long)]
+        guard_remove: bool,
+        #[arg(long)]
+        guard_status: bool,
+    },
+    Guard {
+        #[arg(long, default_value_t = 0.90)]
+        ram_threshold: f64,
+        #[arg(long, default_value_t = 10)]
+        disk_min_gb: u64,
+        #[arg(long, default_value_t = 60)]
+        interval_secs: u64,
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        allow_service_stop: bool,
+        #[arg(long)]
+        allow_kill: bool,
+    },
+    Idle {
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        #[arg(long, default_value_t = 5)]
+        idle_mins: u64,
+        #[arg(long, default_value_t = 10)]
+        min_write_mb: u64,
+        #[arg(long)]
+        clean_cache: bool,
     },
 }

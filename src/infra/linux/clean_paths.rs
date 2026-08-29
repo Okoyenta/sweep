@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::models::CleanCategory;
+use crate::domain::models::{CleanCategory, RiskLevel};
 
 /// builds cleanable categories under the given cache root; each root's
 /// children become removal candidates (see CleanCategory docs)
@@ -23,6 +23,8 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
                 id: id.into(),
                 title: title.into(),
                 roots: vec![root],
+                risk: RiskLevel::Safe,
+                cleanup_command: None,
             });
         }
     }
@@ -41,6 +43,8 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
                     id: "firefox-cache".into(),
                     title: "Firefox cache".into(),
                     roots,
+                    risk: RiskLevel::Safe,
+                    cleanup_command: None,
                 });
             }
         }
@@ -58,6 +62,8 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
                     id: id.into(),
                     title: title.into(),
                     roots: vec![root],
+                    risk: RiskLevel::Safe,
+                    cleanup_command: None,
                 });
             }
         }
@@ -71,6 +77,8 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
                 id: "npm-cache".into(),
                 title: "npm package cache".into(),
                 roots: vec![npm_root],
+                risk: RiskLevel::Safe,
+                cleanup_command: None,
             });
         }
     }
@@ -86,7 +94,9 @@ pub fn discover_categories() -> Vec<CleanCategory> {
             None => return Vec::new(),
         },
     };
-    build_categories(&cache_home)
+    let mut cats = build_categories(&cache_home);
+    cats.extend(crate::infra::dev_caches::discover_dev_categories());
+    cats
 }
 
 #[cfg(test)]
@@ -113,6 +123,31 @@ mod tests {
         assert_eq!(ff.roots.len(), 1);
         assert!(ff.roots[0].ends_with("abc.default/cache2"));
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn discover_categories_includes_dev_caches() {
+        let base = std::env::temp_dir().join(format!(
+            "sweep-linux-dev-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join(".cargo/registry/cache")).unwrap();
+        fs::create_dir_all(base.join(".gradle/caches")).unwrap();
+
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", base.to_str().unwrap()) };
+        let cats = discover_categories();
+        let ids: Vec<&str> = cats.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"dev-cargo"));
+        assert!(ids.contains(&"dev-gradle"));
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
         let _ = fs::remove_dir_all(&base);
     }
 }

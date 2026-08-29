@@ -88,9 +88,9 @@ mod tests {
                     available_bytes: 5,
                 }],
                 top_processes: vec![
-                    ProcessMemInfo { pid: 111, name: "big.exe".into(), memory_bytes: 500 },
-                    ProcessMemInfo { pid: 222, name: "mid.exe".into(), memory_bytes: 300 },
-                    ProcessMemInfo { pid: 333, name: "small.exe".into(), memory_bytes: 100 },
+                    ProcessMemInfo { pid: 111, name: "big.exe".into(), memory_bytes: 500, read_bytes: 0, write_bytes: 0, total_written_bytes: 0 },
+                    ProcessMemInfo { pid: 222, name: "mid.exe".into(), memory_bytes: 300, read_bytes: 0, write_bytes: 0, total_written_bytes: 0 },
+                    ProcessMemInfo { pid: 333, name: "small.exe".into(), memory_bytes: 100, read_bytes: 0, write_bytes: 0, total_written_bytes: 0 },
                 ],
             })
         }

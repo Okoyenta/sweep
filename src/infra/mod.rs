@@ -4,6 +4,8 @@ pub mod paths;
 pub mod sqlite_store;
 pub mod trash_remover;
 pub mod walker;
+pub mod dev_caches;
+pub mod deep_clean;
 
 #[cfg(windows)]
 pub mod win;

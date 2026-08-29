@@ -1,40 +1,43 @@
 # sweep — roadmap
 
-Status: milestones 1–8 complete and shipped as v0.8.0 (status, index, usage
-probes, app inventory, cleaners, RAM tools, TUI dashboard, Linux modules +
-recycle bin, dupes, schedule, TUI actions). Also done since: `sweep du`
-space insights, dupes v2 (DB hash cache), TUI control-center actions
-(clean / dupes / bin / schedule). See `README.md` for what exists today.
+Status: milestones 1–16 complete and shipped (status, index, usage probes,
+app inventory, cleaners incl. pnpm hardlink-aware prune, RAM tools, TUI,
+Linux modules, recycle bin, dupes, schedule, guard daemon, deep scan
+(WU/DO/WinSxS/driver store), service-aware unlock (`--stop-services`), idle
+offender detection, benchmark visibility, guard autostart, `clean --kill`
+(handle-table scan + popup, `-y` skips), diagnose hints, `clean --only`
+scan optimization). See `README.md` for what exists today.
 
-## Next up: `sweep guard` (auto-rescue daemon) — design locked
+## Shipped: `sweep guard` (auto-rescue daemon)
 
-A resident background mode that intervenes before the machine hangs.
-
-**Confirmed decisions**
+**Decisions (implemented)**
 
 - Disk rescue: **auto-clean + Windows toast notification** (not silent,
-  not notify-only). Safe categories include npm/pip caches.
+  not notify-only). Safe categories include npm/pip/pnpm caches.
 - If free space is still below minimum **after** the cache rescue:
   **auto-purge the Recycle Bin** (with its own toast).
-- Defaults locked: RAM ≥ 90 %, disk < 2 GB free, poll every 30 s.
+- Defaults: RAM ≥ 90 %, disk < 2 GB free, poll every 30 s.
 - License: **MIT** (`LICENSE` file + `license = "MIT"` in Cargo.toml).
 
-**Core loop** (`sweep guard [--ram-threshold 90] [--disk-min-gb 2] [--interval-secs 30] [--once]`)
+**Core loop** (`sweep guard [--ram-threshold 90] [--disk-min-gb 2] [--interval-secs 30] [--once] [--allow-service-stop] [--allow-kill]`)
 
-- Poll every N seconds (near-zero CPU while healthy); single-instance lock
+- Poll every N seconds (near-zero CPU while healthy); single-instance lock (`guard.lock`)
 - **RAM pressure**: used ≥ threshold for 3 consecutive samples → trim top-10
   working sets (+ standby purge when elevated); log + toast
 - **Disk pressure**: free < min → trash-backed clean of safe categories
-  (user temp, browser caches, npm/pip) → still low → purge Recycle Bin
+  (user temp, browser caches, npm/pip/pnpm) → still low → purge Recycle Bin
+- Deep/system categories are opt-in via `--deep` + `--allow-service-stop` / `--allow-kill`
 - Rolling log at `%LOCALAPPDATA%\sweep\guard.log`; toast via PowerShell
   WinRT one-liner with graceful no-op if unavailable
 - Cooldown (~10 min) between rescues so warnings/actions never spam
 
-**Autostart**: extend `sweep schedule` with a logon-task variant
-(`schtasks /SC ONLOGON`) pointing at `sweep guard`.
+**Autostart**: `sweep schedule --guard-install` / `--guard-remove` / `--guard-status`
+(`schtasks /SC ONLOGON` on Windows, crontab on Linux) pointing at `sweep guard`.
 
-**Safety rails**: whitelisted categories only, everything trash-backed,
-never kills processes (working-set trim only), cooldown enforced.
+**Safety rails**: whitelisted categories only, everything trash-backed by default,
+`--allow-kill` / `--allow-service-stop` are opt-in, cooldown enforced.
+
+## Next up: adoption features
 
 ## Phase 2 (after guard): adoption features
 

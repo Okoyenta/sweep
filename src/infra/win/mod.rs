@@ -1,5 +1,9 @@
 pub mod apps;
 pub mod clean_paths;
+pub mod deep_clean;
 pub mod prefetch;
+pub mod process_lock;
 pub mod ram;
+pub mod service_lock;
 pub mod userassist;
+pub mod idle;

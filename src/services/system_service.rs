@@ -27,6 +27,9 @@ mod tests {
             pid,
             name: name.into(),
             memory_bytes: mem,
+            read_bytes: 0,
+            write_bytes: 0,
+            total_written_bytes: 0,
         }
     }
 

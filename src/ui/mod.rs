@@ -1,6 +1,9 @@
 pub mod apps;
 pub mod clean;
 pub mod cli;
+pub mod diagnose;
+pub mod guard;
+pub mod idle;
 pub mod ram;
 pub mod status;
 pub mod tui;

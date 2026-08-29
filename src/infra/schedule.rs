@@ -141,6 +141,61 @@ pub fn is_installed() -> anyhow::Result<bool> {
 #[cfg(not(windows))]
 pub use unix_impl::{install, is_installed, remove};
 
+pub const GUARD_TASK_NAME: &str = "SweepGuard";
+
+#[cfg(windows)]
+pub fn guard_install() -> anyhow::Result<()> {
+    let exe = exe_path()?;
+    let args = vec![
+        "/Create".into(),
+        "/F".into(),
+        "/TN".into(),
+        GUARD_TASK_NAME.into(),
+        "/SC".into(),
+        "ONLOGON".into(),
+        "/TR".into(),
+        format!("\"{}\" guard", exe.display()),
+    ];
+    if windows_impl::run(&args)? {
+        println!("guard autostart '{GUARD_TASK_NAME}' installed");
+        Ok(())
+    } else {
+        anyhow::bail!("schtasks /Create for guard failed")
+    }
+}
+
+#[cfg(windows)]
+pub fn guard_remove() -> anyhow::Result<()> {
+    let args = vec!["/Delete".into(), "/F".into(), "/TN".into(), GUARD_TASK_NAME.into()];
+    if windows_impl::run(&args)? {
+        println!("guard autostart '{GUARD_TASK_NAME}' removed");
+        Ok(())
+    } else {
+        anyhow::bail!("guard task not found or deletion refused")
+    }
+}
+
+#[cfg(windows)]
+pub fn guard_is_installed() -> anyhow::Result<bool> {
+    let args = vec!["/Query".into(), "/TN".into(), GUARD_TASK_NAME.into()];
+    Ok(windows_impl::run(&args)?)
+}
+
+#[cfg(not(windows))]
+pub fn guard_install() -> anyhow::Result<()> {
+    anyhow::bail!("guard autostart not supported on Linux")
+}
+
+#[cfg(not(windows))]
+pub fn guard_remove() -> anyhow::Result<()> {
+    anyhow::bail!("guard autostart not supported on Linux")
+}
+
+#[cfg(not(windows))]
+pub fn guard_is_installed() -> anyhow::Result<bool> {
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -50,3 +50,9 @@ pub trait IndexStore {
 pub trait PathNormalizer {
     fn normalize(&self, path: &Path) -> String;
 }
+
+/// Snapshot trait for guard daemon RAM and disk monitoring.
+pub trait GuardMonitor {
+    fn snapshot_ram(&self) -> anyhow::Result<crate::domain::models::RamSnapshot>;
+    fn snapshot_disk(&self) -> anyhow::Result<crate::domain::models::DiskSnapshot>;
+}
