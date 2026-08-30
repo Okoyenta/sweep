@@ -22,14 +22,14 @@ pub fn locked_processes_for_category(category_id: &str, failed_paths: &[&PathBuf
     let own = std::process::id();
     let mut out = Vec::new();
     for (pid, process) in sys.processes() {
-        if *pid.as_u32() == own {
+        if pid.as_u32() == own {
             continue;
         }
         let name = process.name().to_string_lossy().to_lowercase();
         if keywords.iter().any(|k| name.contains(k)) {
             for p in failed_paths.iter() {
                 out.push(LockedProcess {
-                    pid: *pid.as_u32(),
+                    pid: pid.as_u32(),
                     name: process.name().to_string_lossy().into_owned(),
                     path: (*p).clone(),
                 });

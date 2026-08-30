@@ -5,12 +5,13 @@ use crate::domain::models::{CleanCategory, RiskLevel};
 pub fn discover_dev_categories() -> Vec<CleanCategory> {
     let mut cats = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    // Only read on Windows; bound unconditionally to keep the cfg blocks simple.
+    let _local = std::env::var("LOCALAPPDATA").unwrap_or_default();
 
     #[cfg(windows)]
     {
-        if !local.is_empty() {
-            let pnpm = PathBuf::from(&local).join("pnpm").join("store");
+        if !_local.is_empty() {
+            let pnpm = PathBuf::from(&_local).join("pnpm").join("store");
             if pnpm.exists() {
                 cats.push(CleanCategory {
                     id: "dev-pnpm".into(),

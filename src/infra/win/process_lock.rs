@@ -398,7 +398,11 @@ mod tests {
         assert!(core::mem::size_of::<SystemHandleTableEntryInfoEx>() >= 40);
     }
 
+    // Live probe: enumerates the real system handle table, which needs a normal
+    // interactive session. Hosted CI runners return no match, so this is
+    // #[ignore]d there per Constitution Principle IV.
     #[test]
+    #[ignore = "live probe: needs a real session with an enumerable handle table"]
     fn live_detects_own_locked_file_and_is_fast() {
         let dir = std::env::temp_dir();
         let path = dir.join("sweep-live-lock-test.bin");

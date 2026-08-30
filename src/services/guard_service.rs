@@ -330,12 +330,12 @@ impl<M: crate::domain::traits::GuardMonitor> GuardService<M> {
     }
 
     fn handle_ram_pressure(&mut self) -> anyhow::Result<u64> {
-        use crate::infra::sysinfo_monitor::SysinfoMonitor;
-        use crate::services::ram_service::RamService;
-        use crate::infra::win::ram::WinRamTrimmer;
-
         #[cfg(windows)]
         {
+            use crate::infra::sysinfo_monitor::SysinfoMonitor;
+            use crate::infra::win::ram::WinRamTrimmer;
+            use crate::services::ram_service::RamService;
+
             let mut svc = RamService::new(SysinfoMonitor::new(), WinRamTrimmer::new());
             let report = svc.optimize(Some(10), true)?;
             let freed = report.before.used_bytes.saturating_sub(report.after.used_bytes);
