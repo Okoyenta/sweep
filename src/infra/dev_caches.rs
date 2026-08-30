@@ -141,7 +141,12 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("sweep-dev-cache-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        // Discovery looks in a different place per platform: %LOCALAPPDATA%\pnpm\store
+        // on Windows, $HOME/.local/share/pnpm/store on Linux.
+        #[cfg(windows)]
         fs::create_dir_all(dir.join("pnpm/store")).unwrap();
+        #[cfg(not(windows))]
+        fs::create_dir_all(dir.join(".local/share/pnpm/store")).unwrap();
         let orig_home = std::env::var("HOME").ok();
         #[cfg(windows)]
         let orig_local = std::env::var("LOCALAPPDATA").ok();

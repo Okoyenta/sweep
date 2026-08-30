@@ -305,6 +305,9 @@ mod tests {
         assert!(!glob_match("**/cache/**", "/home/me/.CACHE/thing"));
     }
 
+    // Backslash paths only behave as paths on Windows; on Linux `C:\Games\Cache`
+    // is one filename component, so each platform gets its own fixture.
+    #[cfg(windows)]
     #[test]
     fn is_path_excluded_matches_prefix_and_glob() {
         let excl = ExclusionConfig {
@@ -317,9 +320,23 @@ mod tests {
         assert!(!is_path_excluded(Path::new(r"C:\proj\src"), &excl));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn is_path_excluded_matches_prefix_and_glob() {
+        let excl = ExclusionConfig {
+            paths: vec![PathBuf::from("/games")],
+            globs: vec!["**/node_modules/**".into()],
+            ..Default::default()
+        };
+        assert!(is_path_excluded(Path::new("/games/cache"), &excl));
+        assert!(is_path_excluded(Path::new("/proj/node_modules/x"), &excl));
+        assert!(!is_path_excluded(Path::new("/proj/src"), &excl));
+    }
+
     #[test]
     fn empty_config_excludes_nothing() {
         let excl = ExclusionConfig::default();
+        assert!(!is_path_excluded(Path::new("/anything"), &excl));
         assert!(!is_path_excluded(Path::new(r"C:\anything"), &excl));
     }
 
