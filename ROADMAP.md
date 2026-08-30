@@ -64,6 +64,17 @@ Closes the "sweep frees space but doesn't maintain the drive" gap.
 
 ## Phase 4: backlog
 
+- **Reclaim storage from the TUI** — the TUI shows disk gauges but cannot act on
+  them: its only actions are `t` (RAM trim), `p` (standby purge), and `k` (kill).
+  Freeing disk space means quitting and running `sweep clean`. Proposal: a `c`
+  key opening a category list with sizes and a confirm modal, reusing the `k`
+  modal pattern. Needs the same treatment as `doctor` — a time budget or a
+  background scan with progress — because `clean --scan-only` can take minutes
+  and must not freeze the UI on a synchronous walk.
+- **A real Windows installer** — WiX (MSI) or Inno Setup, for a Start Menu
+  entry, PATH registration, and an Add/Remove Programs entry. Today both winget
+  and scoop install in portable mode (bare exe + shim). Pairs with code signing,
+  without which SmartScreen warns on direct download.
 - Medium-value ideas: watch-folder alerts, `sweep self-uninstall`,
   first-run doctor on launch, large/old-file cleanup wizard in TUI
 
