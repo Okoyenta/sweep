@@ -1,6 +1,27 @@
-use crate::domain::models::{CategoryScan, DiagnoseReport, DiagnoseRow, RiskLevel};
+use crate::domain::models::{CategoryScan, DiagnoseReport, DiagnoseRow, ExclusionConfig, RiskLevel};
 
 pub struct DiagnoseService;
+
+/// Drop rows excluded by `sweep.toml`, returning the survivors and the excluded
+/// count so the UI can print an `excluded: N` line (FR-004, FR-005).
+///
+/// Matching is by category id; path/glob exclusions are applied earlier, during
+/// discovery, so nothing excluded is ever sized.
+pub fn filter_excluded_rows(
+    rows: Vec<DiagnoseRow>,
+    excl: &ExclusionConfig,
+) -> (Vec<DiagnoseRow>, usize) {
+    if excl.is_empty() {
+        return (rows, 0);
+    }
+    let before = rows.len();
+    let kept: Vec<DiagnoseRow> = rows
+        .into_iter()
+        .filter(|r| !excl.category_ids.iter().any(|id| id == &r.category_id))
+        .collect();
+    let excluded = before - kept.len();
+    (kept, excluded)
+}
 
 impl DiagnoseService {
     pub fn build_report(scans: &[CategoryScan]) -> DiagnoseReport {

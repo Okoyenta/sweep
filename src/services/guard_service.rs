@@ -147,6 +147,14 @@ mod tests {
     }
 }
 
+/// Minimum sustained idle time before guard may gracefully close a process
+/// under `--allow-kill` (FR-012: more than 60 minutes).
+const GUARD_CLOSE_MIN_IDLE_MINS: u64 = 60;
+
+/// Minimum write rate before guard may gracefully close a process under
+/// `--allow-kill` (FR-012: more than 500 MB/h).
+const GUARD_CLOSE_MIN_WRITE_BYTES_PER_HOUR: f64 = 500.0 * 1024.0 * 1024.0;
+
 pub struct GuardService<M: crate::domain::traits::GuardMonitor> {
     monitor: M,
     config: crate::domain::models::GuardConfig,
@@ -247,10 +255,77 @@ impl<M: crate::domain::traits::GuardMonitor> GuardService<M> {
             freed = Some(bytes_freed);
         }
 
+        // Tier 2 escalation, opt-in only. Without --allow-kill guard is strictly
+        // trim-only and never touches a process (FR-013, Principle II).
+        if self.config.allow_kill {
+            self.close_idle_offenders()?;
+        }
+
         let disk_free_gb = disk.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let ram_pct = ram.used_pct;
         crate::ui::guard::print_guard_cycle(ram_pct, disk_free_gb, &action.to_string(), freed);
 
+        Ok(())
+    }
+
+    /// Gracefully close idle offenders sustaining heavy writes, when the user
+    /// passed `--allow-kill`.
+    ///
+    /// Guard only ever performs a tier-2 graceful close — never a forced kill —
+    /// and only for processes exceeding both the write-rate and idle-duration
+    /// thresholds (FR-012). Every decision, including blocklist skips, is
+    /// written to the audit log.
+    fn close_idle_offenders(&mut self) -> anyhow::Result<()> {
+        use crate::domain::models::{KillMode, KillRequest};
+        use crate::services::idle_service::{IdleConfig, IdleService};
+        use crate::services::kill_service::KillService;
+
+        let config = IdleConfig {
+            top: usize::MAX,
+            idle_mins: GUARD_CLOSE_MIN_IDLE_MINS,
+            min_write_mb: 0,
+            clean_cache: false,
+        };
+        let offenders = match IdleService::new().detect_fast(&config) {
+            Ok(o) => o,
+            Err(e) => {
+                GuardLog::warn(&format!("idle detection failed: {e}"))?;
+                return Ok(());
+            }
+        };
+
+        let svc = KillService::new();
+        for off in offenders {
+            if off.writes_per_hour < GUARD_CLOSE_MIN_WRITE_BYTES_PER_HOUR {
+                continue;
+            }
+            let req = KillRequest {
+                pid: off.pid,
+                name: off.name.clone(),
+                size_bytes: off.memory_bytes,
+                mode: KillMode::Close,
+                // The user consented to tier-2 closes by passing --allow-kill.
+                consent: true,
+            };
+            if KillService::is_blocked(&req) {
+                GuardLog::info(&format!(
+                    "skipped {} (PID {}): protected system process",
+                    req.name, req.pid
+                ))?;
+                continue;
+            }
+            if svc.execute(&req) {
+                GuardLog::action(
+                    &format!(
+                        "graceful close (allow-kill consent): {} PID {} writing {:.0} MB/h",
+                        req.name,
+                        req.pid,
+                        off.writes_per_hour / (1024.0 * 1024.0)
+                    ),
+                    None,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -289,21 +364,31 @@ impl<M: crate::domain::traits::GuardMonitor> GuardService<M> {
 
         {
             use crate::domain::models::RiskLevel;
-            use crate::services::clean_service::CleanService;
+            use crate::services::clean_service::{discover_with_policy, CleanService};
 
-            #[cfg(windows)]
-            let categories = crate::infra::win::clean_paths::discover_categories();
-            #[cfg(not(windows))]
-            let categories = crate::infra::linux::clean_paths::discover_categories();
+            // Unattended cleaning must honor the user's `sweep.toml` exclusions
+            // just like an interactive `sweep clean` does (FR-005).
+            let discovered = discover_with_policy(None, None, false);
+            if discovered.excluded > 0 {
+                GuardLog::info(&format!(
+                    "disk rescue: {} category/categories excluded by sweep.toml",
+                    discovered.excluded
+                ))?;
+            }
 
-            let safe_cats: Vec<_> = categories
+            let safe_cats: Vec<_> = discovered
+                .categories
                 .into_iter()
                 .filter(|c| c.risk == RiskLevel::Safe)
                 .collect();
 
             let svc = CleanService::new(crate::infra::trash_remover::TrashRemover::new());
-            let scans = svc.scan(&safe_cats);
+            let scans = svc.scan_excluding(&safe_cats, &discovered.exclusions);
             let outcome = svc.run(&scans, None)?;
+            // Guard-trashed items are recoverable with `sweep undo` too.
+            if let Err(e) = crate::infra::undo::append_session(outcome.undo_items.clone()) {
+                GuardLog::warn(&format!("could not write undo journal: {e}"))?;
+            }
             total_freed += outcome.removed_bytes;
             if free_bytes + total_freed >= target_bytes {
                 return Ok(total_freed);

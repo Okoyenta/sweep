@@ -8,6 +8,26 @@ Design goals: **< 50 MB RAM**, **~0 idle CPU**, strict layered architecture.
 
 Upcoming work and design plans: see [ROADMAP.md](ROADMAP.md).
 
+## Install
+
+Download the binary for your OS from the
+[latest release](https://github.com/Okoyenta/sweep/releases/latest) and put it
+on your `PATH`:
+
+```console
+# Windows
+curl -L -o sweep.exe https://github.com/Okoyenta/sweep/releases/latest/download/sweep-windows-x64.exe
+
+# Linux
+curl -L -o sweep https://github.com/Okoyenta/sweep/releases/latest/download/sweep-linux-x64
+chmod +x sweep
+```
+
+Package-manager install (`winget` / `scoop`) is wired up in the release
+workflow but needs one-time account setup before it works — see
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md). There is no MSI/Inno installer and
+the binary is unsigned.
+
 ## Commands
 
 | Command | Description |
@@ -18,7 +38,7 @@ Upcoming work and design plans: see [ROADMAP.md](ROADMAP.md).
 | `sweep apps [--since-days N] [--uninstall NAME]` | list installed apps (name/version/size/last-run); launch official uninstallers on Windows |
 | `sweep clean [--scan-only] [--only ids...] [-y] [--deep] [--stop-services] [--kill]` | scan and reclaim cache/temp categories (Recycle Bin / trash backed); `--deep` includes system categories (WU/DO/WinSxS/driver store), `--stop-services` stops wuauserv+bits via RAII, `--kill` detects lock-holding processes (handle-table scan on Windows, name-heuristic on Linux), shows popup and kills on confirm (`-y` skips popup) |
 | `sweep ram [--trim-top N] [--purge-standby]` | trim process working sets; purge standby list / kernel caches |
-| `sweep tui [--top N]` | live dashboard (auto-refresh 2 s; `q` quit, `r` refresh, `t` trim top-10, `p` purge standby) |
+| `sweep tui [--top N]` | live dashboard (auto-refresh 2 s; `q` quit, `r` refresh, `t` trim top-10, `p` purge standby, `b` background view, `i` idle-writer view, `↑`/`↓` select, `k` kill with confirmation) |
 | `sweep bin [--empty] [-y]` | list recycle bin contents; permanently empty it |
 | `sweep dupes [--min-mb N] [--trash-group N] [-y]` | duplicate-file groups from the index, sorted by wasted bytes |
 | `sweep diagnose [--deep]` | scan safe + system categories with per-category hints; `--deep` includes WU downloads, DO cache, WinSxS, driver store (risk=System) |
@@ -26,6 +46,102 @@ Upcoming work and design plans: see [ROADMAP.md](ROADMAP.md).
 | `sweep schedule --guard-install\|--guard-remove\|--guard-status` | register guard daemon on logon via scheduled task |
 | `sweep guard [--once] [--ram-threshold N] [--disk-min-gb N] [--interval-secs N] [--allow-service-stop] [--allow-kill]` | background daemon: trims RAM on pressure, graduated disk rescue; `--once` single-pass |
 | `sweep idle [--top N] [--idle-mins N] [--min-write-mb N] [--clean-cache]` | detect idle heavy SSD writers via two-snapshot I/O diff; `--clean-cache` cleans whitelisted dirs |
+| `sweep idle --close [--only PID...]` | graceful close (`WM_CLOSE` / `SIGTERM`) of idle offenders |
+| `sweep idle --kill --force [--only PID...]` | forced kill, after a per-process `kill <name> PID <pid> <size>?` confirmation |
+| `sweep bg [--top N] [--kill --force] [--only PID...]` | background-process list; same consent + blocklist rules as `idle` |
+| `sweep doctor` | pre-flight safety report: reserve, elevation, toast, guard armed state, idle offenders, per-volume media type, would-clean estimate |
+| `sweep optimize` | list volumes with detected media (ssd/hdd) and the maintenance action each implies |
+| `sweep optimize --volume C: [--analyze] [-y]` | TRIM a solid-state volume or defragment a rotational one; `--analyze` previews without modifying |
+| `sweep undo` | restore the most recent session of trashed items from the Recycle Bin |
+| `sweep --version` | print the version and, when online, whether a newer release is available |
+
+Two global flags apply to every command: `--config <path>` selects a specific
+`sweep.toml`, and `--rules <path>` loads an extra cleaner rule pack.
+
+## Trust & control
+
+### Exclusions and custom cleaners (`sweep.toml`)
+
+`sweep.toml` is looked up in this order: `--config <path>`, then `./sweep.toml`,
+then the user config dir (`%LOCALAPPDATA%\sweep\sweep.toml` on Windows,
+`~/.config/sweep/sweep.toml` on Linux). If no file is found, sweep behaves
+exactly as it does without one. A malformed file is reported and then ignored —
+it never aborts a run.
+
+```toml
+[exclusions]
+paths = ["C:/Games/Cache"]        # this tree is never scanned or cleaned
+category_ids = ["dev-pnpm"]       # skip a category entirely
+globs = ["**/node_modules/**"]    # matched case-insensitively
+
+[[category]]                      # add a cleaner without a code change
+id = "myapp-cache"
+roots = ["%LOCALAPPDATA%/MyApp/Cache"]
+risk = "Safe"                     # or "System" (hidden unless --deep)
+# cleanup_command = "myapp --clear"
+```
+
+Exclusions are honored by `diagnose`, `clean`, and `guard`, and excluded paths
+are pruned *before* their size is measured, so excluded space is never counted
+or touched. When anything is excluded, sweep prints an `excluded: N` line.
+
+### Undo
+
+Every `sweep clean` (and every guard disk rescue) records what it moved to the
+Recycle Bin. `sweep undo` restores the most recent session:
+
+```console
+sweep clean -y --only user-temp
+sweep undo
+```
+
+**Limitation:** undo relies on the OS Recycle Bin still holding the items. If the
+Bin has been emptied — manually, by `sweep bin --empty`, or by guard's
+documented auto-purge fallback — those items are gone for good. `sweep undo`
+reports each such item as `unrecoverable (recycle bin purged)` and exits 0
+rather than failing silently. Only the newest session is restorable; the journal
+keeps the last 20 for audit.
+
+### Process termination
+
+Termination is graduated and never silent (Constitution Principle II):
+
+1. **Trim** — `sweep ram --trim-top N`, always safe, the default guard action.
+2. **Graceful close** — `sweep idle --close` sends `WM_CLOSE` / `SIGTERM`.
+3. **Forced kill** — `sweep idle --kill --force` or `sweep bg --kill --force`
+   prompts `kill <name> PID <pid> <size>?` for each process and acts only on an
+   explicit yes.
+
+A hard blocklist (PID 0, PID 4, `csrss`, `wininit`, `services`, and sweep's own
+PID) is always applied first and cannot be overridden by any flag. `sweep guard`
+never kills: without `--allow-kill` it is trim-only, and with `--allow-kill` it
+performs a graceful close only, and only for processes writing more than
+500 MB/h while idle for over 60 minutes. Every decision is written to
+`%LOCALAPPDATA%\sweep\guard.log`.
+
+### Drive maintenance (`sweep optimize`)
+
+Sweep frees space; `optimize` keeps the drive healthy afterwards. It picks the
+action from the drive's physical media, and **never guesses**:
+
+| Media | Action | Why |
+| --- | --- | --- |
+| Solid-state | TRIM (`Optimize-Volume -ReTrim` / `fstrim`) | Tells the drive which blocks are free after a clean. Defragmenting flash would burn write cycles for no seek benefit. |
+| Rotational | Defragment (`Optimize-Volume -Defrag`) | Clearing scattered caches leaves free-space fragmentation that costs seeks. Not available on Linux — ext4/xfs/btrfs manage extents themselves. |
+| Unknown | Nothing | Sweep refuses rather than risk defragmenting an SSD. |
+
+```console
+sweep optimize                          # list volumes and their media
+sweep optimize --volume C: --analyze    # preview, modifies nothing
+sweep optimize --volume C:              # confirms, then runs
+```
+
+Media type comes from the device itself — the seek-penalty storage ioctl on
+Windows, `/sys/block/<dev>/queue/rotational` on Linux — so detection is instant
+and needs no elevation. Running the maintenance **does** require elevation
+(Administrator / root); sweep says so before prompting rather than failing
+afterwards. Defrag is long-running and I/O-heavy, so it always confirms unless
+`-y` is passed.
 
 ## Cleanable categories (v1)
 

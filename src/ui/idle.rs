@@ -1,6 +1,40 @@
-use crate::domain::models::IdleSsdOffender;
+use crate::domain::models::{IdleSsdOffender, KillRequest, ProcessMemInfo};
 use crate::ui::status::fmt;
 
+/// Ask the user to confirm terminating one specific process.
+///
+/// Renders the exact prompt required by FR-010 —
+/// `kill <name> PID <pid> <size>?` — and returns true only on an explicit yes.
+/// Every forced kill passes through here, so termination is never silent.
+pub fn confirm_kill_process(req: &KillRequest) -> bool {
+    crate::ui::apps::confirm(&format!(
+        "kill {} PID {} {}?",
+        req.name,
+        req.pid,
+        fmt(req.size_bytes)
+    ))
+}
+
+/// Print the background-process table used by `sweep bg` (CLI counterpart of
+/// the TUI `b` view).
+pub fn print_background_table(procs: &[ProcessMemInfo]) {
+    if procs.is_empty() {
+        println!("no background processes detected");
+        return;
+    }
+    println!("  {:<8} {:<24} {:>12} {:>12}", "PID", "APP", "RAM", "WRITTEN");
+    for p in procs {
+        println!(
+            "  {:<8} {:<24} {:>12} {:>12}",
+            p.pid,
+            truncate(&p.name, 24),
+            fmt(p.memory_bytes),
+            fmt(p.total_written_bytes),
+        );
+    }
+}
+
+/// Print the idle heavy-writer table (PID, APP, IDLE, WRITE/h, RAM, REASON).
 pub fn print_idle_table(offenders: &[IdleSsdOffender]) {
     if offenders.is_empty() {
         println!("no idle heavy writers detected");

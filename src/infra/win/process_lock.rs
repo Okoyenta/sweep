@@ -340,6 +340,24 @@ fn paths_equal(resolved: &str, target: &str) -> bool {
     normalize_target(resolved) == normalize_target(target)
 }
 
+/// Gracefully request the process to exit by posting `WM_CLOSE` (via `taskkill`
+/// without `/F`, which asks top-level windows to close).
+pub fn graceful_close(pid: u32) -> bool {
+    let out = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Forcefully terminate the process (`taskkill /F /PID`). Blocklist checks are
+/// the caller's responsibility (see `kill_service`).
+pub fn kill(pid: u32) -> bool {
+    let out = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

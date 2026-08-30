@@ -1,3 +1,24 @@
 /target
 .opencode/
 .specify/
+
+# Rust
+*.rs.bk
+*.pdb
+
+# Local sweep config used while testing exclusions/rule packs
+/sweep.toml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Secrets
+.env
+.env.*
+
+# Claude Code local config
+.claude/

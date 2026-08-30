@@ -16,6 +16,16 @@ pub fn print_kill_list(apps: &[LockedProcess]) {
     }
 }
 
+/// Report how many categories `sweep.toml` excluded from this run.
+///
+/// Silent when nothing was excluded, so default output is unchanged for users
+/// with no `sweep.toml` (FR-005, US2 acceptance #3).
+pub fn print_excluded(excluded: usize) {
+    if excluded > 0 {
+        println!("excluded: {excluded} (sweep.toml)");
+    }
+}
+
 pub fn print_scans(scans: &[CategoryScan]) {
     if scans.is_empty() {
         println!("no cleanable categories found");

@@ -135,6 +135,12 @@ pub fn guard_lock_path() -> PathBuf {
     data_dir().join("guard.lock")
 }
 
+/// Path of the user `sweep.toml` config in the sweep data dir (used as the
+/// lowest-precedence fallback after `--config` and the CWD copy).
+pub fn sweep_toml_path() -> PathBuf {
+    data_dir().join("sweep.toml")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

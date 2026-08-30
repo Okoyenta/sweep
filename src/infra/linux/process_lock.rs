@@ -53,6 +53,23 @@ fn keywords_for(category_id: &str) -> Vec<&'static str> {
     }
 }
 
+/// Gracefully terminate the process with SIGTERM (`kill -TERM`).
+pub fn graceful_close(pid: u32) -> bool {
+    let out = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Forcefully terminate the process with SIGKILL (`kill -KILL`). Blocklist
+/// checks are the caller's responsibility (see `kill_service`).
+pub fn kill(pid: u32) -> bool {
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

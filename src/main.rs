@@ -18,6 +18,13 @@ use sweep::ui::status::fmt;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config = cli.config.clone();
+    let rules = cli.rules.clone();
+    let config = config.as_deref();
+    let rules = rules.as_deref();
+    if cli.version {
+        return run_version();
+    }
     match cli.command {
         Some(Command::Status { top }) => run_status(top),
         Some(Command::Index {
@@ -36,7 +43,7 @@ fn main() -> Result<()> {
             deep,
             stop_services,
             kill,
-        }) => run_clean(scan_only, only, yes, deep, stop_services, kill),
+        }) => run_clean(scan_only, only, yes, deep, stop_services, kill, config, rules),
         Some(Command::Ram {
             trim_top,
             purge_standby,
@@ -48,7 +55,7 @@ fn main() -> Result<()> {
             trash_group,
             yes,
         }) => run_dupes(min_mb, trash_group, yes),
-        Some(Command::Diagnose { deep }) => run_diagnose(deep),
+        Some(Command::Diagnose { deep }) => run_diagnose(deep, config, rules),
         Some(Command::Schedule {
             install,
             remove,
@@ -70,9 +77,162 @@ fn main() -> Result<()> {
             idle_mins,
             min_write_mb,
             clean_cache,
-        }) => run_idle(top, idle_mins, min_write_mb, clean_cache),
+            close,
+            kill,
+            force,
+            only,
+        }) => run_idle(
+            top,
+            idle_mins,
+            min_write_mb,
+            clean_cache,
+            close,
+            kill,
+            force,
+            &only,
+        ),
+        Some(Command::Doctor) => run_doctor(config, rules),
+        Some(Command::Optimize {
+            volume,
+            analyze,
+            yes,
+        }) => run_optimize(volume.as_deref(), analyze, yes),
+        Some(Command::Undo) => run_undo(),
+        Some(Command::Bg {
+            top,
+            kill,
+            force,
+            only,
+        }) => run_bg(top, kill, force, &only),
         None => run_status(10),
     }
+}
+
+/// `sweep --version` — print the version, plus an update hint when a newer
+/// release is published. Offline or timed-out checks print the version only.
+fn run_version() -> Result<()> {
+    use sweep::services::system_service::{check_for_update, UpdateCheck};
+
+    let current = env!("CARGO_PKG_VERSION");
+    print!("sweep {current}");
+    match check_for_update(current) {
+        UpdateCheck::Available(tag) => println!("  update available: {tag}"),
+        UpdateCheck::UpToDate => println!(),
+        UpdateCheck::Skipped => println!("  (update check skipped)"),
+    }
+    Ok(())
+}
+
+/// `sweep doctor` — print the pre-flight safety report. Always exits 0.
+fn run_doctor(
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
+) -> Result<()> {
+    use sweep::services::doctor_service::DoctorService;
+
+    let report = DoctorService::new().report(config, rules);
+    sweep::ui::doctor::print_report(&report);
+    Ok(())
+}
+
+/// `sweep optimize` — TRIM solid-state volumes, defragment rotational ones.
+///
+/// With no `--volume` it lists every volume and its detected media, changing
+/// nothing. Maintenance is confirmed per volume unless `-y` is passed, because
+/// a defrag pass is long-running and I/O-heavy.
+fn run_optimize(volume: Option<&str>, analyze: bool, yes: bool) -> Result<()> {
+    use sweep::services::optimize_service::{action_description, OptimizeService};
+
+    let svc = OptimizeService::new();
+    let volumes = svc.volumes();
+
+    let Some(target) = volume else {
+        sweep::ui::optimize::print_volumes(&volumes);
+        println!("\npass --volume <mount> to maintain one (add --analyze to preview)");
+        return Ok(());
+    };
+
+    let want = normalize_mount(target);
+    let Some(info) = volumes
+        .iter()
+        .find(|v| normalize_mount(&v.mount) == want)
+    else {
+        anyhow::bail!(
+            "no volume matching '{target}'; run `sweep optimize` to list detected volumes"
+        );
+    };
+
+    let action = sweep::services::optimize_service::action_for(info.media);
+    println!(
+        "{} [{}]: {}",
+        info.mount,
+        info.media,
+        action_description(&action, &info.mount)
+    );
+
+    // Both Optimize-Volume and fstrim require elevation; say so up front rather
+    // than letting the tool fail with a stack trace after the user consents.
+    if !is_elevated() {
+        println!(
+            "note: not elevated — drive maintenance needs {}",
+            if cfg!(windows) {
+                "an Administrator prompt"
+            } else {
+                "root (sudo)"
+            }
+        );
+    }
+
+    if !analyze {
+        let proceed = yes
+            || sweep::ui::apps::confirm(&format!("run {action} on {}?", info.mount));
+        if !proceed {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let outcome = svc.run(info, analyze);
+    sweep::ui::optimize::print_outcome(&outcome, analyze);
+    Ok(())
+}
+
+/// Whether sweep currently holds administrator / root rights.
+fn is_elevated() -> bool {
+    use sweep::domain::models::ElevationStatus;
+
+    #[cfg(windows)]
+    let status = sweep::infra::win::doctor::elevation_status();
+    #[cfg(not(windows))]
+    let status = sweep::infra::linux::doctor::elevation_status();
+
+    status == ElevationStatus::Elevated
+}
+
+/// Compare mount points case-insensitively, ignoring a trailing separator, so
+/// `C:`, `C:\`, and `c:/` all select the same volume.
+fn normalize_mount(mount: &str) -> String {
+    let trimmed = mount.trim_end_matches(['\\', '/']);
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        // A bare "/" trims to empty; keep it addressable.
+        if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+/// `sweep undo` — restore the newest trashed session. Exits 0 even when the
+/// journal is empty or the Recycle Bin was purged.
+fn run_undo() -> Result<()> {
+    use sweep::services::undo_service::UndoService;
+
+    let outcome = UndoService::new().undo();
+    sweep::ui::undo::print_outcome(&outcome);
+    Ok(())
 }
 
 fn open_store() -> Result<SqliteStore> {
@@ -244,8 +404,10 @@ fn run_clean(
     deep: bool,
     stop_services: bool,
     kill: bool,
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
 ) -> Result<()> {
-    use sweep::services::clean_service::CleanService;
+    use sweep::services::clean_service::{discover_with_policy, CleanService};
 
     let _service_guard = if deep && stop_services {
         Some(sweep::infra::win::service_lock::ServiceGuard::new(&[
@@ -255,23 +417,21 @@ fn run_clean(
         None
     };
 
-    let categories = if deep {
-        sweep::infra::win::clean_paths::discover_categories_deep()
-    } else {
-        sweep::infra::win::clean_paths::discover_categories()
-    };
+    let discovered = discover_with_policy(config, rules, deep);
+    sweep::ui::clean::print_excluded(discovered.excluded);
     // When --only is set, only scan the requested categories to keep --scan-only fast
     // (avoids walking large stores like pnpm when not needed).
     let categories: Vec<_> = if only.is_empty() {
-        categories
+        discovered.categories
     } else {
-        categories
+        discovered
+            .categories
             .into_iter()
             .filter(|c| only.iter().any(|id| id == &c.id))
             .collect()
     };
     let svc = CleanService::new(sweep::infra::trash_remover::TrashRemover::new());
-    let scans = svc.scan(&categories);
+    let scans = svc.scan_excluding(&categories, &discovered.exclusions);
 
     let selected = if only.is_empty() {
         scans.clone()
@@ -322,8 +482,12 @@ fn run_clean(
                 kill_processes(&apps);
                 let retry_start = Instant::now();
                 let retry = svc.run(&scans, Some(&only))?;
-                // the retry replaces the outcome so the report reflects reality
-                outcome = retry;
+                // the retry replaces the outcome so the report reflects reality,
+                // but both passes trashed items that undo must be able to restore
+                let mut merged = retry;
+                merged.undo_items.extend(outcome.undo_items);
+                outcome = merged;
+                record_undo_session(&outcome);
                 let after = free_bytes_on_index_volume();
                 sweep::ui::clean::print_outcome(&outcome, false);
                 sweep::ui::clean::print_benchmark(&BenchmarkSample {
@@ -342,6 +506,7 @@ fn run_clean(
 
     let elapsed = start.elapsed().as_secs_f64();
     let after = free_bytes_on_index_volume();
+    record_undo_session(&outcome);
     sweep::ui::clean::print_outcome(&outcome, false);
     sweep::ui::clean::print_benchmark(&BenchmarkSample {
         before_free_bytes: before,
@@ -351,6 +516,24 @@ fn run_clean(
     });
     try_recreate_reserve();
     Ok(())
+}
+
+/// Append the items trashed by this run to the undo journal (FR-006).
+///
+/// Journal failures are reported but never fail the clean itself — the files are
+/// already safely in the Recycle Bin.
+fn record_undo_session(outcome: &sweep::domain::models::CleanOutcome) {
+    if outcome.undo_items.is_empty() {
+        return;
+    }
+    if let Err(e) = sweep::infra::undo::append_session(outcome.undo_items.clone()) {
+        eprintln!("warning: could not write undo journal: {e}");
+    } else {
+        println!(
+            "undo: {} item(s) recorded — restore with `sweep undo`",
+            outcome.undo_items.len()
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -375,24 +558,27 @@ fn run_clean(
     scan_only: bool,
     only: Vec<String>,
     yes: bool,
-    _deep: bool,
+    deep: bool,
     _stop_services: bool,
     kill: bool,
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
 ) -> Result<()> {
-    use sweep::infra::linux::clean_paths;
-    use sweep::services::clean_service::CleanService;
+    use sweep::services::clean_service::{discover_with_policy, CleanService};
 
-    let categories = clean_paths::discover_categories();
+    let discovered = discover_with_policy(config, rules, deep);
+    sweep::ui::clean::print_excluded(discovered.excluded);
     let categories: Vec<_> = if only.is_empty() {
-        categories
+        discovered.categories
     } else {
-        categories
+        discovered
+            .categories
             .into_iter()
             .filter(|c| only.iter().any(|id| id == &c.id))
             .collect()
     };
     let svc = CleanService::new(sweep::infra::trash_remover::TrashRemover::new());
-    let scans = svc.scan(&categories);
+    let scans = svc.scan_excluding(&categories, &discovered.exclusions);
 
     let selected: Vec<_> = if only.is_empty() {
         scans.clone()
@@ -453,7 +639,10 @@ fn run_clean(
         if any_killed {
             let after = free_bytes_on_index_volume();
             let retry = svc.run(&scans, Some(&only))?;
-            outcome = retry;
+            let mut merged = retry;
+            merged.undo_items.extend(outcome.undo_items);
+            outcome = merged;
+            record_undo_session(&outcome);
             sweep::ui::clean::print_outcome(&outcome, false);
             sweep::ui::clean::print_benchmark(&BenchmarkSample {
                 before_free_bytes: before,
@@ -468,6 +657,7 @@ fn run_clean(
 
     let elapsed = start.elapsed().as_secs_f64();
     let after = free_bytes_on_index_volume();
+    record_undo_session(&outcome);
     sweep::ui::clean::print_outcome(&outcome, false);
     sweep::ui::clean::print_benchmark(&BenchmarkSample {
         before_free_bytes: before,
@@ -581,6 +771,30 @@ fn run_tui(top: usize) -> Result<()> {
                 #[cfg(not(windows))]
                 anyhow::bail!("purge not supported here")
             }
+            // The modal already took the user's consent and the blocklist was
+            // checked before it opened; KillService re-checks both anyway.
+            TuiAction::Terminate {
+                pid,
+                name,
+                size_bytes,
+                mode,
+            } => {
+                use sweep::domain::models::KillRequest;
+                use sweep::services::kill_service::KillService;
+
+                let req = KillRequest {
+                    pid,
+                    name: name.clone(),
+                    size_bytes,
+                    mode,
+                    consent: true,
+                };
+                if KillService::new().execute(&req) {
+                    Ok(format!("terminated {name} (PID {pid})"))
+                } else {
+                    Ok(format!("{name} (PID {pid}) refused or already gone"))
+                }
+            }
         }
     };
 
@@ -590,6 +804,15 @@ fn run_tui(top: usize) -> Result<()> {
             let snap = service.status_report(top)?;
             let usage = UsageService::new(usage_probes()).collect_map();
             Ok(DashboardData { snap, usage })
+        },
+        || {
+            use sweep::services::idle_service::{IdleConfig, IdleService};
+            IdleService::new().detect_fast(&IdleConfig {
+                top: 20,
+                idle_mins: 5,
+                min_write_mb: 10,
+                clean_cache: false,
+            })
         },
         act,
     );
@@ -738,9 +961,13 @@ fn run_schedule(
     anyhow::bail!("nothing to do; pass --install, --remove or --status")
 }
 
-fn run_diagnose(deep: bool) -> Result<()> {
+fn run_diagnose(
+    deep: bool,
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
+) -> Result<()> {
     let store = open_store()?;
-    sweep::ui::diagnose::run_diagnose(&store, deep)?;
+    sweep::ui::diagnose::run_diagnose(&store, deep, config, rules)?;
     Ok(())
 }
 
@@ -881,8 +1108,22 @@ fn run_guard(
     Ok(())
 }
 
-fn run_idle(top: usize, idle_mins: u64, min_write_mb: u64, clean_cache: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn run_idle(
+    top: usize,
+    idle_mins: u64,
+    min_write_mb: u64,
+    clean_cache: bool,
+    close: bool,
+    kill: bool,
+    force: bool,
+    only: &[u32],
+) -> Result<()> {
     use sweep::services::idle_service::{IdleConfig, IdleService};
+
+    if kill && !force {
+        anyhow::bail!("`--kill` requires `--force` (and still confirms each process)");
+    }
 
     let config = IdleConfig {
         top,
@@ -892,8 +1133,33 @@ fn run_idle(top: usize, idle_mins: u64, min_write_mb: u64, clean_cache: bool) ->
     };
 
     let svc = IdleService::new();
-    let offenders = svc.detect(&config)?;
+    // Termination targets specific PIDs, so skip the 60s sampling window.
+    let offenders = if close || kill {
+        svc.detect_fast(&config)?
+    } else {
+        svc.detect(&config)?
+    };
     sweep::ui::idle::print_idle_table(&offenders);
+
+    if close || kill {
+        let targets: Vec<sweep::domain::models::KillRequest> = offenders
+            .iter()
+            .filter(|o| only.is_empty() || only.contains(&o.pid))
+            .map(|o| sweep::domain::models::KillRequest {
+                pid: o.pid,
+                name: o.name.clone(),
+                size_bytes: o.memory_bytes,
+                mode: if kill {
+                    sweep::domain::models::KillMode::Kill
+                } else {
+                    sweep::domain::models::KillMode::Close
+                },
+                consent: false,
+            })
+            .collect();
+        terminate_with_consent(targets);
+        return Ok(());
+    }
 
     if clean_cache && !offenders.is_empty() {
         let freed = IdleService::clean_cache(&offenders)?;
@@ -903,4 +1169,81 @@ fn run_idle(top: usize, idle_mins: u64, min_write_mb: u64, clean_cache: bool) ->
     }
 
     Ok(())
+}
+
+/// `sweep bg` — list background processes by memory, with the same
+/// consent-gated, blocklist-guarded termination as `sweep idle`.
+fn run_bg(top: usize, kill: bool, force: bool, only: &[u32]) -> Result<()> {
+    use sweep::services::system_service::SystemService;
+
+    if kill && !force {
+        anyhow::bail!("`--kill` requires `--force` (and still confirms each process)");
+    }
+
+    let mut service = SystemService::new(sweep::infra::sysinfo_monitor::SysinfoMonitor::new());
+    let snap = service.status_report(top)?;
+    sweep::ui::idle::print_background_table(&snap.top_processes);
+
+    if !kill {
+        return Ok(());
+    }
+    let targets: Vec<sweep::domain::models::KillRequest> = snap
+        .top_processes
+        .iter()
+        .filter(|p| only.is_empty() || only.contains(&p.pid))
+        .map(|p| sweep::domain::models::KillRequest {
+            pid: p.pid,
+            name: p.name.clone(),
+            size_bytes: p.memory_bytes,
+            mode: sweep::domain::models::KillMode::Kill,
+            consent: false,
+        })
+        .collect();
+    terminate_with_consent(targets);
+    Ok(())
+}
+
+/// Run each termination request through the blocklist and, for forced kills, an
+/// explicit per-process confirmation prompt (FR-010, FR-011).
+///
+/// Nothing is ever terminated without passing both gates; every decision is
+/// printed so the action is never silent (Principle II).
+fn terminate_with_consent(targets: Vec<sweep::domain::models::KillRequest>) {
+    use sweep::domain::models::KillMode;
+    use sweep::services::kill_service::KillService;
+
+    if targets.is_empty() {
+        println!("no matching processes");
+        return;
+    }
+    let svc = KillService::new();
+    for mut req in targets {
+        if KillService::is_blocked(&req) {
+            println!(
+                "  skipped {} (PID {}): protected system process",
+                req.name, req.pid
+            );
+            continue;
+        }
+        if req.mode == KillMode::Kill {
+            req.consent = sweep::ui::idle::confirm_kill_process(&req);
+            if !req.consent {
+                println!("  skipped {} (PID {}): not confirmed", req.name, req.pid);
+                continue;
+            }
+        }
+        let verb = if req.mode == KillMode::Kill {
+            "killed"
+        } else {
+            "closed"
+        };
+        if svc.execute(&req) {
+            println!("  {} {} (PID {})", verb, req.name, req.pid);
+        } else {
+            println!(
+                "  {} (PID {}) already gone or could not be {}",
+                req.name, req.pid, verb
+            );
+        }
+    }
 }
