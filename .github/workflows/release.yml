@@ -1,4 +1,4 @@
-name: Release Linux build
+name: Release
 
 on:
   push:
@@ -20,3 +20,223 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: sweep-linux-x64
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # -j 2 avoids the AV/linker races documented in the constitution.
+      - name: Build release
+        run: cargo build --release --locked -j 2
+      - name: Rename artifact
+        run: copy target\release\sweep.exe sweep-windows-x64.exe
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sweep-windows-x64.exe
+
+  manifests:
+    # Manifests reference the published Windows binary, so they wait for it.
+    needs: build-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      url: ${{ steps.meta.outputs.url }}
+      sha256: ${{ steps.meta.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version and hash
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/sweep-windows-x64.exe"
+          # Retry: the asset can take a moment to become downloadable.
+          for attempt in 1 2 3 4 5; do
+            if curl -sSfL -o sweep-windows-x64.exe "$URL"; then break; fi
+            sleep 10
+          done
+          SHA256="$(sha256sum sweep-windows-x64.exe | cut -d' ' -f1 | tr 'a-f' 'A-F')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Generate winget manifests
+        run: |
+          set -euo pipefail
+          DIR="manifests/winget"
+          mkdir -p "$DIR"
+          VERSION="${{ steps.meta.outputs.version }}"
+          cat > "$DIR/Okoyenta.Sweep.yaml" <<EOF
+          PackageIdentifier: Okoyenta.Sweep
+          PackageVersion: $VERSION
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          EOF
+          cat > "$DIR/Okoyenta.Sweep.locale.en-US.yaml" <<EOF
+          PackageIdentifier: Okoyenta.Sweep
+          PackageVersion: $VERSION
+          PackageLocale: en-US
+          Publisher: Okoyenta
+          PackageName: sweep
+          License: MIT
+          ShortDescription: Monitor and free disk space and RAM
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          EOF
+          cat > "$DIR/Okoyenta.Sweep.installer.yaml" <<EOF
+          PackageIdentifier: Okoyenta.Sweep
+          PackageVersion: $VERSION
+          InstallerType: portable
+          Installers:
+            - Architecture: x64
+              InstallerUrl: ${{ steps.meta.outputs.url }}
+              InstallerSha256: ${{ steps.meta.outputs.sha256 }}
+              # Without this, winget names the command after the downloaded
+              # file and users would have to type \`sweep-windows-x64\`.
+              PortableCommandAlias: sweep
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          EOF
+
+      - name: Generate scoop manifest
+        run: |
+          set -euo pipefail
+          mkdir -p manifests/scoop
+          cat > manifests/scoop/sweep.json <<EOF
+          {
+            "version": "${{ steps.meta.outputs.version }}",
+            "description": "Monitor and free disk space and RAM",
+            "homepage": "https://github.com/${GITHUB_REPOSITORY}",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "${{ steps.meta.outputs.url }}",
+                "hash": "${{ steps.meta.outputs.sha256 }}"
+              }
+            },
+            "bin": [["sweep-windows-x64.exe", "sweep"]],
+            "checkver": "github",
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v\$version/sweep-windows-x64.exe"
+                }
+              }
+            }
+          }
+          EOF
+
+      # Shared with the publish jobs so the manifest is generated exactly once.
+      - name: Upload manifests as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests/
+
+      - name: Attach manifests to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            manifests/winget/Okoyenta.Sweep.yaml
+            manifests/winget/Okoyenta.Sweep.locale.en-US.yaml
+            manifests/winget/Okoyenta.Sweep.installer.yaml
+            manifests/scoop/sweep.json
+
+  publish-winget:
+    # Opens a PR against microsoft/winget-pkgs so `winget install` works.
+    # Skips silently when WINGET_TOKEN is not configured — see docs/DISTRIBUTION.md.
+    needs: manifests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for submission token
+        id: gate
+        shell: bash
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "${WINGET_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=winget skipped::WINGET_TOKEN secret is not set; no winget-pkgs PR was opened. See docs/DISTRIBUTION.md."
+          fi
+
+      - name: Submit to winget-pkgs
+        if: steps.gate.outputs.ready == 'true'
+        # Publishing is best-effort: the release binaries are already attached,
+        # and a submission hiccup must not mark the whole release failed.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $version = "${{ needs.manifests.outputs.version }}"
+          $url = "${{ needs.manifests.outputs.url }}"
+          # First-party Microsoft tool; avoids depending on a third-party action.
+          curl.exe -L -o wingetcreate.exe https://aka.ms/wingetcreate/latest
+          # `update` requires the package to already exist in winget-pkgs; the
+          # very first submission must be made once with `wingetcreate new`.
+          .\wingetcreate.exe update Okoyenta.Sweep `
+            --version $version `
+            --urls "$url" `
+            --submit `
+            --token $env:WINGET_TOKEN
+
+  publish-scoop:
+    # Pushes the manifest into the scoop bucket repo so `scoop install` works.
+    # Skips silently when SCOOP_BUCKET_TOKEN is not configured.
+    needs: manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for bucket token
+        id: gate
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -n "${SCOOP_BUCKET_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=scoop skipped::SCOOP_BUCKET_TOKEN secret is not set; the scoop bucket was not updated. See docs/DISTRIBUTION.md."
+          fi
+
+      - name: Download manifests
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests
+
+      - name: Check out scoop bucket
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SCOOP_BUCKET_REPO || format('{0}-bucket', github.repository) }}
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: bucket-repo
+
+      - name: Commit manifest to bucket
+        if: steps.gate.outputs.ready == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p bucket-repo/bucket
+          cp manifests/scoop/sweep.json bucket-repo/bucket/sweep.json
+          cd bucket-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- bucket/sweep.json; then
+            echo "bucket manifest already up to date"
+            exit 0
+          fi
+          git add bucket/sweep.json
+          git commit -m "sweep ${{ needs.manifests.outputs.version }}"
+          git push

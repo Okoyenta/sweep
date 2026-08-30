@@ -340,6 +340,24 @@ fn paths_equal(resolved: &str, target: &str) -> bool {
     normalize_target(resolved) == normalize_target(target)
 }
 
+/// Gracefully request the process to exit by posting `WM_CLOSE` (via `taskkill`
+/// without `/F`, which asks top-level windows to close).
+pub fn graceful_close(pid: u32) -> bool {
+    let out = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Forcefully terminate the process (`taskkill /F /PID`). Blocklist checks are
+/// the caller's responsibility (see `kill_service`).
+pub fn kill(pid: u32) -> bool {
+    let out = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,7 +398,11 @@ mod tests {
         assert!(core::mem::size_of::<SystemHandleTableEntryInfoEx>() >= 40);
     }
 
+    // Live probe: enumerates the real system handle table, which needs a normal
+    // interactive session. Hosted CI runners return no match, so this is
+    // #[ignore]d there per Constitution Principle IV.
     #[test]
+    #[ignore = "live probe: needs a real session with an enumerable handle table"]
     fn live_detects_own_locked_file_and_is_fast() {
         let dir = std::env::temp_dir();
         let path = dir.join("sweep-live-lock-test.bin");

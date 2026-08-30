@@ -2,6 +2,9 @@ use sysinfo::{ProcessesToUpdate, System};
 
 use crate::domain::models::{IdleReason, IdleSsdOffender};
 
+/// Length of the disk-write sampling window used by [`IdleService::detect`].
+pub const DEFAULT_SAMPLE_SECS: u64 = 60;
+
 pub struct IdleConfig {
     pub top: usize,
     pub idle_mins: u64,
@@ -16,12 +19,36 @@ impl IdleService {
         Self
     }
 
+    /// Detect idle heavy writers by sampling disk I/O over
+    /// [`DEFAULT_SAMPLE_SECS`]. Blocks for the length of the window.
     pub fn detect(&self, config: &IdleConfig) -> anyhow::Result<Vec<IdleSsdOffender>> {
+        self.detect_with_window(config, DEFAULT_SAMPLE_SECS)
+    }
+
+    /// Detect idle heavy writers without blocking, using each process's
+    /// cumulative written bytes over its lifetime instead of a sampled delta.
+    ///
+    /// Less precise than [`Self::detect`] but returns immediately, which is what
+    /// `sweep doctor` (SC-001: under 5 seconds) and the TUI need.
+    pub fn detect_fast(&self, config: &IdleConfig) -> anyhow::Result<Vec<IdleSsdOffender>> {
+        self.detect_with_window(config, 0)
+    }
+
+    /// Shared detection body. A `sample_secs` of 0 skips the sleep and treats a
+    /// process's lifetime write total as the measured volume.
+    fn detect_with_window(
+        &self,
+        config: &IdleConfig,
+        sample_secs: u64,
+    ) -> anyhow::Result<Vec<IdleSsdOffender>> {
         let mut sys1 = System::new();
         sys1.refresh_processes(ProcessesToUpdate::All, true);
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        if sample_secs > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(sample_secs));
+        }
         let mut sys2 = System::new();
         sys2.refresh_processes(ProcessesToUpdate::All, true);
+        let sampled = sample_secs > 0;
 
         let fg_pid = foreground_pid();
         let min_write_bytes = config.min_write_mb * 1024 * 1024;
@@ -34,14 +61,18 @@ impl IdleService {
                 continue;
             }
             let proc1 = sys1.process(*pid);
-            let write_delta = proc2
-                .disk_usage()
-                .total_written_bytes
-                .saturating_sub(
+            let total_written = proc2.disk_usage().total_written_bytes;
+            // With a sampling window we measure the delta across it; without one
+            // (doctor / TUI) the lifetime total is the best instant estimate.
+            let write_delta = if sampled {
+                total_written.saturating_sub(
                     proc1
                         .map(|p| p.disk_usage().total_written_bytes)
-                        .unwrap_or(proc2.disk_usage().total_written_bytes),
-                );
+                        .unwrap_or(total_written),
+                )
+            } else {
+                total_written
+            };
 
             if write_delta < min_write_bytes {
                 continue;

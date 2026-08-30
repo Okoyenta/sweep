@@ -22,14 +22,14 @@ pub fn locked_processes_for_category(category_id: &str, failed_paths: &[&PathBuf
     let own = std::process::id();
     let mut out = Vec::new();
     for (pid, process) in sys.processes() {
-        if *pid.as_u32() == own {
+        if pid.as_u32() == own {
             continue;
         }
         let name = process.name().to_string_lossy().to_lowercase();
         if keywords.iter().any(|k| name.contains(k)) {
             for p in failed_paths.iter() {
                 out.push(LockedProcess {
-                    pid: *pid.as_u32(),
+                    pid: pid.as_u32(),
                     name: process.name().to_string_lossy().into_owned(),
                     path: (*p).clone(),
                 });
@@ -51,6 +51,23 @@ fn keywords_for(category_id: &str) -> Vec<&'static str> {
         "dev-pnpm" => vec!["node"],
         _ => Vec::new(),
     }
+}
+
+/// Gracefully terminate the process with SIGTERM (`kill -TERM`).
+pub fn graceful_close(pid: u32) -> bool {
+    let out = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Forcefully terminate the process with SIGKILL (`kill -KILL`). Blocklist
+/// checks are the caller's responsibility (see `kill_service`).
+pub fn kill(pid: u32) -> bool {
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
 }
 
 #[cfg(test)]

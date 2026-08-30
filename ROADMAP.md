@@ -37,27 +37,48 @@ scan optimization). See `README.md` for what exists today.
 **Safety rails**: whitelisted categories only, everything trash-backed by default,
 `--allow-kill` / `--allow-service-stop` are opt-in, cooldown enforced.
 
-## Next up: adoption features
-
-## Phase 2 (after guard): adoption features
+## Shipped: Stage 3 — Trust & Control (spec `003-trust-control`)
 
 Goal: make sweep trustworthy enough that people let it run unattended.
 
-| # | Feature | Why |
-|---|---------|-----|
-| 1 | **`sweep doctor`** | Pre-flight check: what guard would do right now, elevation state, toast support, category sizes — builds trust before enabling autostart |
-| 2 | **Exclusions via `sweep.toml`** | Per-user ignore lists (paths, apps, categories) honored by every cleaner + guard; required for "leave my stuff alone" |
-| 3 | **Undo journal** | Record trashed items per session → `sweep undo`. Limitation to document: once the Recycle Bin is purged (manually or by guard), undo is impossible |
-| 4 | **Cleaner rule packs** | Data-driven TOML rules for new apps without code changes |
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | **`sweep doctor`** | Shipped — reserve, elevation, toast, guard armed state, idle offender count, would-clean estimate (time-budgeted so the report stays under 5 s) |
+| 2 | **Exclusions via `sweep.toml`** | Shipped — paths / category ids / globs, honored by `diagnose`, `clean`, and `guard`; pruned before sizing |
+| 3 | **Undo journal** | Shipped — `sweep clean` and guard rescues journal every trashed item; `sweep undo` restores the newest session and reports purged items as unrecoverable |
+| 4 | **Controlled termination** | Shipped — `idle --close` (graceful), `idle --kill --force` / `bg --kill --force` behind a per-process confirm, hard system blocklist, guard `--allow-kill` is graceful-close-only |
+| 5 | **TUI `b` / `i` / `k`** | Shipped — background and idle views, row selection, kill confirmation modal that refuses blocklisted processes |
+| 6 | **Cleaner rule packs** | Shipped — TOML `[[category]]` with env-var expansion, id-collision and missing-root handling, `System` risk hidden unless `--deep`, `--rules <path>` for extra packs |
+| 7 | **Distribution** | Shipped — tuned `[profile.release]`, `sweep --version` update check, Windows + Linux release artifacts, winget + scoop manifests |
 
-## Phase 3: distribution & credibility
+## Shipped: drive maintenance (`sweep optimize`)
 
-- Release-profile tuning: `Cargo.toml` has no `[profile.release]` section yet
-  (`strip`, `lto`, `codegen-units`) — quick win to shrink the ~7.8 MB binary
-- GitHub Actions matrix builds (Windows + Linux) — also solves the Linux
-  cross-compile problem below
-- winget + scoop manifests; `sweep --version` update check
-- Medium-value ideas (backlog): watch-folder alerts, `sweep self-uninstall`,
+Closes the "sweep frees space but doesn't maintain the drive" gap.
+
+- Media detection per volume: seek-penalty storage ioctl on Windows,
+  `/sys/block/<dev>/queue/rotational` on Linux — instant, no elevation
+- SSD → TRIM, HDD → defrag, unknown → refuse (never defrag flash)
+- `--analyze` previews; maintenance confirms unless `-y`; elevation reported
+  up front instead of failing mid-run
+- Media type surfaced on a `storage:` line in `sweep doctor`
+
+## Phase 4: backlog
+
+- **Reclaim storage from the TUI** — the TUI shows disk gauges but cannot act on
+  them: its only actions are `t` (RAM trim), `p` (standby purge), and `k` (kill).
+  Freeing disk space means quitting and running `sweep clean`. Proposal: a `c`
+  key opening a category list with sizes and a confirm modal, reusing the `k`
+  modal pattern. Needs the same treatment as `doctor` — a time budget or a
+  background scan with progress — because `clean --scan-only` can take minutes
+  and must not freeze the UI on a synchronous walk.
+- **A real Windows installer** — *deprioritized: winget is the chosen install
+  path.* winget's portable mode already puts `sweep` on the user `PATH` via its
+  Links directory, which was the main reason to want an installer. A WiX (MSI)
+  or Inno Setup package would only add a Start Menu entry, an Add/Remove
+  Programs entry, and Group Policy / Intune deployment. Revisit if enterprise
+  deployment is ever needed. Pairs with code signing, without which SmartScreen
+  warns on direct download.
+- Medium-value ideas: watch-folder alerts, `sweep self-uninstall`,
   first-run doctor on launch, large/old-file cleanup wizard in TUI
 
 ## Known limitations to revisit

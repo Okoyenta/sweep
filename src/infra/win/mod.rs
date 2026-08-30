@@ -5,5 +5,7 @@ pub mod prefetch;
 pub mod process_lock;
 pub mod ram;
 pub mod service_lock;
+pub mod storage;
 pub mod userassist;
 pub mod idle;
+pub mod doctor;

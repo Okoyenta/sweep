@@ -2,8 +2,61 @@ use std::path::Path;
 
 use jwalk::WalkDir;
 
-use crate::domain::models::{CategoryScan, CleanCategory, CleanOutcome};
+use crate::domain::models::{
+    CategoryScan, CleanCategory, CleanOutcome, ExclusionConfig, UndoItem,
+};
 use crate::domain::traits::PathRemover;
+
+/// The cleanable categories for this run, plus how many were excluded.
+///
+/// Produced by [`discover_with_policy`] so every caller (clean, doctor, guard)
+/// applies user exclusions and rule packs identically.
+pub struct DiscoveredCategories {
+    /// categories that survived exclusion filtering
+    pub categories: Vec<CleanCategory>,
+    /// how many categories `sweep.toml` excluded (for the `excluded: N` line)
+    pub excluded: usize,
+    /// the loaded exclusion config, for pruning individual items during scan
+    pub exclusions: ExclusionConfig,
+}
+
+/// Discover built-in categories for this OS, merge user rule packs, then drop
+/// everything excluded by `sweep.toml`.
+///
+/// This is the single discovery entry point used by `sweep clean`,
+/// `sweep doctor`, and the guard disk rescue, so exclusions (FR-005) and rule
+/// packs (FR-015) apply everywhere without duplication.
+pub fn discover_with_policy(
+    config_override: Option<&Path>,
+    rules_override: Option<&Path>,
+    deep: bool,
+) -> DiscoveredCategories {
+    use crate::services::exclusion_service;
+
+    #[cfg(windows)]
+    let builtin = if deep {
+        crate::infra::win::clean_paths::discover_categories_deep()
+    } else {
+        crate::infra::win::clean_paths::discover_categories()
+    };
+    #[cfg(not(windows))]
+    let builtin = crate::infra::linux::clean_paths::discover_categories();
+
+    let (exclusions, packs) =
+        exclusion_service::load_policy_with_rules(config_override, rules_override);
+
+    let mut all = builtin.clone();
+    all.extend(exclusion_service::rule_packs_to_categories(
+        &packs, &builtin, deep,
+    ));
+
+    let (categories, excluded) = exclusion_service::apply_exclusions(&all, &exclusions);
+    DiscoveredCategories {
+        categories,
+        excluded,
+        exclusions,
+    }
+}
 
 pub struct CleanService<R: PathRemover> {
     remover: R,
@@ -17,6 +70,19 @@ impl<R: PathRemover> CleanService<R> {
     /// measures every category: candidates = existing children of each root
     /// (or the root itself when it is a plain file)
     pub fn scan(&self, categories: &[CleanCategory]) -> Vec<CategoryScan> {
+        self.scan_excluding(categories, &ExclusionConfig::default())
+    }
+
+    /// Like [`Self::scan`], but prunes individual candidate items matched by
+    /// `excl` *before* their size is measured, so excluded space is never
+    /// counted and never cleaned (FR-005, US2 acceptance #4).
+    pub fn scan_excluding(
+        &self,
+        categories: &[CleanCategory],
+        excl: &ExclusionConfig,
+    ) -> Vec<CategoryScan> {
+        use crate::services::exclusion_service::is_path_excluded;
+
         categories
             .iter()
             .map(|cat| {
@@ -33,6 +99,7 @@ impl<R: PathRemover> CleanService<R> {
                         }
                     }
                 }
+                items.retain(|item| !is_path_excluded(item, excl));
                 let mut total_bytes = 0u64;
                 let mut files = 0u64;
                 for item in &items {
@@ -50,6 +117,60 @@ impl<R: PathRemover> CleanService<R> {
                 }
             })
             .collect()
+    }
+
+    /// Size categories under a wall-clock `budget`, giving up on further walking
+    /// once it is spent.
+    ///
+    /// A full scan walks every cache tree and can take minutes on a large disk,
+    /// which `sweep doctor` cannot afford (SC-001: under 5 seconds). Returns the
+    /// scans plus a flag indicating the budget ran out, so the caller can label
+    /// the figure as partial rather than reporting a wrong total as exact.
+    pub fn scan_within(
+        &self,
+        categories: &[CleanCategory],
+        excl: &ExclusionConfig,
+        budget: std::time::Duration,
+    ) -> (Vec<CategoryScan>, bool) {
+        use crate::services::exclusion_service::is_path_excluded;
+
+        let deadline = std::time::Instant::now() + budget;
+        let mut truncated = false;
+        let scans = categories
+            .iter()
+            .map(|cat| {
+                let mut items = Vec::new();
+                for root in &cat.roots {
+                    if root.is_file() {
+                        items.push(root.clone());
+                    } else if root.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(root) {
+                            items.extend(entries.flatten().map(|e| e.path()));
+                        }
+                    }
+                }
+                items.retain(|item| !is_path_excluded(item, excl));
+                let mut total_bytes = 0u64;
+                let mut files = 0u64;
+                for item in &items {
+                    let (b, f, done) = measure_within(item, deadline);
+                    total_bytes += b;
+                    files += f;
+                    if !done {
+                        truncated = true;
+                    }
+                }
+                CategoryScan {
+                    category_id: cat.id.clone(),
+                    title: cat.title.clone(),
+                    files,
+                    total_bytes,
+                    items,
+                    cleanup_command: cat.cleanup_command.clone(),
+                }
+            })
+            .collect();
+        (scans, truncated)
     }
 
     pub fn run(
@@ -94,6 +215,14 @@ impl<R: PathRemover> CleanService<R> {
                     Ok(()) => {
                         outcome.removed_items += 1;
                         outcome.removed_bytes += bytes;
+                        // Record the move so `sweep undo` can restore it. The
+                        // trash crate exposes no separate trash id, so the
+                        // original path doubles as the lookup key (FR-006).
+                        outcome.undo_items.push(UndoItem {
+                            original_path: item.clone(),
+                            trash_path: item.clone(),
+                            size_bytes: bytes,
+                        });
                     }
                     Err(_) => {
                         outcome.failed_items += 1;
@@ -104,6 +233,43 @@ impl<R: PathRemover> CleanService<R> {
         }
         Ok(outcome)
     }
+}
+
+/// Like [`measure`], but stops walking once `deadline` passes.
+///
+/// Returns `(bytes, files, completed)`; `completed` is false when the walk was
+/// cut short, so the caller knows the figure is a lower bound.
+fn measure_within(path: &Path, deadline: std::time::Instant) -> (u64, u64, bool) {
+    if std::time::Instant::now() >= deadline {
+        return (0, 0, false);
+    }
+    if path.is_file() {
+        return (
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            1,
+            true,
+        );
+    }
+    let mut bytes = 0u64;
+    let mut files = 0u64;
+    // Check the clock every N entries rather than per entry: the syscall is
+    // cheap but not free, and cache trees have many small files.
+    const CLOCK_CHECK_EVERY: u64 = 512;
+    let mut seen = 0u64;
+    for entry in WalkDir::new(path).parallelism(jwalk::Parallelism::Serial) {
+        seen += 1;
+        if seen % CLOCK_CHECK_EVERY == 0 && std::time::Instant::now() >= deadline {
+            return (bytes, files, false);
+        }
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().is_file() {
+            if let Ok(md) = entry.metadata() {
+                bytes += md.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files, true)
 }
 
 fn measure(path: &Path) -> (u64, u64) {

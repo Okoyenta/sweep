@@ -3,23 +3,45 @@ use std::io::Write;
 use crate::domain::models::{DiagnoseReport, DiagnoseRow, RiskLevel};
 use crate::domain::traits::IndexStore;
 
-pub fn run_diagnose(store: &dyn IndexStore, deep: bool) -> anyhow::Result<()> {
-    let report = build_report(store, deep)?;
+pub fn run_diagnose(
+    store: &dyn IndexStore,
+    deep: bool,
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let report = build_report(store, deep, config, rules)?;
     let mut out = std::io::stdout();
     print_report(&report, &mut out)?;
     Ok(())
 }
 
-fn build_report(store: &dyn IndexStore, deep: bool) -> anyhow::Result<DiagnoseReport> {
+fn build_report(
+    store: &dyn IndexStore,
+    deep: bool,
+    config: Option<&std::path::Path>,
+    rules: Option<&std::path::Path>,
+) -> anyhow::Result<DiagnoseReport> {
     use crate::infra::dev_caches::discover_dev_categories;
     use crate::infra::paths::index_db_path;
+    use crate::services::exclusion_service;
 
     let mut rows: Vec<DiagnoseRow> = Vec::new();
 
+    // Same policy source as clean/guard, so an exclusion hides a category
+    // everywhere and a rule pack shows up everywhere (FR-005, FR-015).
+    let (exclusions, packs) = exclusion_service::load_policy_with_rules(config, rules);
     let dev_cats = discover_dev_categories();
-    for cat in &dev_cats {
+    let mut all_cats = dev_cats.clone();
+    all_cats.extend(exclusion_service::rule_packs_to_categories(
+        &packs, &dev_cats, deep,
+    ));
+
+    for cat in &all_cats {
         let mut total = 0u64;
         for root in &cat.roots {
+            if exclusion_service::is_path_excluded(root, &exclusions) {
+                continue;
+            }
             if let Ok(meta) = std::fs::metadata(root) {
                 if meta.is_file() {
                     total += meta.len();
@@ -38,7 +60,7 @@ fn build_report(store: &dyn IndexStore, deep: bool) -> anyhow::Result<DiagnoseRe
                 category_id: cat.id.clone(),
                 title: cat.title.clone(),
                 size_bytes: total,
-                risk: RiskLevel::Safe,
+                risk: cat.risk,
                 reclaimable: true,
                 hint,
             });
@@ -107,6 +129,10 @@ fn build_report(store: &dyn IndexStore, deep: bool) -> anyhow::Result<DiagnoseRe
             });
         }
     }
+
+    let (mut rows, excluded) =
+        crate::services::diagnose_service::filter_excluded_rows(rows, &exclusions);
+    crate::ui::clean::print_excluded(excluded);
 
     rows.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 

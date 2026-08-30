@@ -5,12 +5,13 @@ use crate::domain::models::{CleanCategory, RiskLevel};
 pub fn discover_dev_categories() -> Vec<CleanCategory> {
     let mut cats = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    // Only read on Windows; bound unconditionally to keep the cfg blocks simple.
+    let _local = std::env::var("LOCALAPPDATA").unwrap_or_default();
 
     #[cfg(windows)]
     {
-        if !local.is_empty() {
-            let pnpm = PathBuf::from(&local).join("pnpm").join("store");
+        if !_local.is_empty() {
+            let pnpm = PathBuf::from(&_local).join("pnpm").join("store");
             if pnpm.exists() {
                 cats.push(CleanCategory {
                     id: "dev-pnpm".into(),
@@ -140,7 +141,12 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("sweep-dev-cache-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        // Discovery looks in a different place per platform: %LOCALAPPDATA%\pnpm\store
+        // on Windows, $HOME/.local/share/pnpm/store on Linux.
+        #[cfg(windows)]
         fs::create_dir_all(dir.join("pnpm/store")).unwrap();
+        #[cfg(not(windows))]
+        fs::create_dir_all(dir.join(".local/share/pnpm/store")).unwrap();
         let orig_home = std::env::var("HOME").ok();
         #[cfg(windows)]
         let orig_local = std::env::var("LOCALAPPDATA").ok();
