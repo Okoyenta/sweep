@@ -97,6 +97,9 @@ jobs:
             - Architecture: x64
               InstallerUrl: ${{ steps.meta.outputs.url }}
               InstallerSha256: ${{ steps.meta.outputs.sha256 }}
+              # Without this, winget names the command after the downloaded
+              # file and users would have to type \`sweep-windows-x64\`.
+              PortableCommandAlias: sweep
           ManifestType: installer
           ManifestVersion: 1.6.0
           EOF

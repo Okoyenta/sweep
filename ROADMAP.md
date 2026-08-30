@@ -71,10 +71,13 @@ Closes the "sweep frees space but doesn't maintain the drive" gap.
   modal pattern. Needs the same treatment as `doctor` — a time budget or a
   background scan with progress — because `clean --scan-only` can take minutes
   and must not freeze the UI on a synchronous walk.
-- **A real Windows installer** — WiX (MSI) or Inno Setup, for a Start Menu
-  entry, PATH registration, and an Add/Remove Programs entry. Today both winget
-  and scoop install in portable mode (bare exe + shim). Pairs with code signing,
-  without which SmartScreen warns on direct download.
+- **A real Windows installer** — *deprioritized: winget is the chosen install
+  path.* winget's portable mode already puts `sweep` on the user `PATH` via its
+  Links directory, which was the main reason to want an installer. A WiX (MSI)
+  or Inno Setup package would only add a Start Menu entry, an Add/Remove
+  Programs entry, and Group Policy / Intune deployment. Revisit if enterprise
+  deployment is ever needed. Pairs with code signing, without which SmartScreen
+  warns on direct download.
 - Medium-value ideas: watch-folder alerts, `sweep self-uninstall`,
   first-run doctor on launch, large/old-file cleanup wizard in TUI
 

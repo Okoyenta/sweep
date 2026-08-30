@@ -70,12 +70,43 @@ scoop install sweep
 Unlike winget, there is no review queue — the first tagged release after setup
 publishes immediately.
 
+## Does it end up on PATH?
+
+**Yes — both package managers handle `PATH` for you.** This is why sweep ships
+as a portable package rather than an installer.
+
+**winget.** A `portable` package is unpacked to
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\...` and a shim is created in
+`%LOCALAPPDATA%\Microsoft\WinGet\Links\`, which winget itself adds to your
+**user** `PATH`. So this works with no manual step:
+
+```console
+winget install Okoyenta.Sweep
+sweep doctor
+```
+
+The command is `sweep`, not `sweep-windows-x64`, because the installer manifest
+sets `PortableCommandAlias: sweep`. Without that field winget derives the
+command name from the downloaded file name — worth remembering if the release
+asset is ever renamed.
+
+**scoop.** Shims go in `~/scoop/shims`, which is on `PATH` from the moment
+scoop is installed. The `bin` entry in the manifest maps the exe to `sweep`.
+
+Two caveats either way:
+
+- **Open a new terminal after installing.** An already-running shell keeps its
+  old `PATH`; the change is not picked up retroactively.
+- Uninstalling (`winget uninstall Okoyenta.Sweep` / `scoop uninstall sweep`)
+  removes the shim, so `PATH` stays clean.
+
 ## Current limitations
 
-- **No installer.** Both package managers install the binary in portable mode:
-  the exe is placed on `PATH` with a shim, but there is no Start Menu entry and
-  no Add/Remove Programs entry. A real MSI (WiX) or Inno Setup installer is not
-  built.
+- **No installer.** Both package managers install in portable mode. `PATH` is
+  handled (above), but there is no Start Menu entry, no Add/Remove Programs
+  entry, and no Group Policy / Intune deployment. Those are the only reasons to
+  add a real MSI (WiX) or Inno Setup installer, and none of them apply to
+  installing a CLI tool for yourself.
 - **No code signing.** The binary is unsigned, so Windows SmartScreen may warn
   on direct download until it accrues reputation. Signing needs a certificate.
 - **No uninstaller.** `sweep self-uninstall` is still in the ROADMAP backlog;

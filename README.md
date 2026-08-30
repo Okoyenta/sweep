@@ -23,10 +23,18 @@ curl -L -o sweep https://github.com/Okoyenta/sweep/releases/latest/download/swee
 chmod +x sweep
 ```
 
-Package-manager install (`winget` / `scoop`) is wired up in the release
-workflow but needs one-time account setup before it works — see
-[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md). There is no MSI/Inno installer and
-the binary is unsigned.
+Once the package is published, winget is the intended install path and puts
+`sweep` on your `PATH` automatically (open a new terminal afterwards):
+
+```console
+winget install Okoyenta.Sweep
+```
+
+Package-manager install is wired up in the release workflow but needs one-time
+account setup before it works — see
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md). There is no MSI/Inno installer
+(winget handles `PATH`, so one isn't needed for a CLI tool) and the binary is
+unsigned.
 
 ## Commands
 
