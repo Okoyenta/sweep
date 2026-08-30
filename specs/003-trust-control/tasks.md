@@ -221,7 +221,7 @@
 **Purpose**: Verification, documentation, and release readiness across all stories
 
 - [X] T085 [P] Run `cargo build --release` and record the binary size against the ~7.8 MB baseline (SC-008)
-- [X] T086 [P] Run `cargo test --locked` and confirm green on both `ubuntu-latest` and `windows-latest` per .github/workflows/ci.yml (SC-010) — 97 tests green locally on Windows (95 lib + 2 integration, 1 live probe ignored). Ubuntu leg still needs CI to confirm: no Linux toolchain is available on this host
+- [X] T086 [P] Run `cargo test --locked` and confirm green on both `ubuntu-latest` and `windows-latest` per .github/workflows/ci.yml (SC-010) — **verified green on both** in CI run 33338625094 (PR #1): ubuntu-latest 118 passed / 1 ignored plus a successful release build, windows-latest 123 passed / 3 ignored. Reaching green required fixing three pre-existing Linux build breaks (`infra::win` imported outside a `cfg`, a `u32` deref, an unused binding) and two tests that had only ever run on Windows
 - [X] T087 [P] Audit every new public item across src/domain, src/infra, src/services, and src/ui for doc comments (FR-021, Principle VII)
 - [X] T088 [P] Document the new commands and the `sweep.toml` schema (doctor, undo, idle `--close`/`--kill --force`, bg, `--version`, `--config`, `--rules`) in README.md
 - [X] T089 [P] Document the Recycle-Bin-purge undo limitation in README.md (spec edge case, Principle II)
