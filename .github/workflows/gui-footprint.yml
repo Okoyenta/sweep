@@ -33,14 +33,26 @@ jobs:
       - name: Linux GUI prerequisites
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           sudo apt-get update -qq
           # xvfb gives the probe a display; mesa provides software OpenGL so a
           # GPU-backed toolkit still starts on a headless runner.
+          #
+          # The -dev packages are load-bearing, not optional: slint links
+          # fontconfig through pkg-config (needs fontconfig.pc), and fltk
+          # compiles FLTK from source with CMake against the X11 headers.
           sudo apt-get install -y -qq \
             xvfb libgl1 libegl1 libxkbcommon-x11-0 libxcb-xkb1 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-cursor0 \
-            libwayland-dev libxkbcommon-dev pkg-config cmake
+            libwayland-dev libxkbcommon-dev pkg-config cmake \
+            libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxext-dev libxft-dev libxinerama-dev \
+            libxcursor-dev libxrender-dev libxfixes-dev \
+            libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev
+          # Prove the two that actually blocked the last run are present.
+          pkg-config --exists fontconfig && echo "fontconfig.pc: OK"
+          test -f /usr/include/X11/Xlib.h && echo "X11 headers: OK"
 
       - name: Generate probe crate
         shell: bash
