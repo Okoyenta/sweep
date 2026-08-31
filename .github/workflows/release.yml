@@ -168,6 +168,13 @@ jobs:
             echo "::notice title=winget skipped::WINGET_TOKEN secret is not set; no winget-pkgs PR was opened. See docs/DISTRIBUTION.md."
           fi
 
+      - name: Download manifests
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests
+
       - name: Submit to winget-pkgs
         if: steps.gate.outputs.ready == 'true'
         # Publishing is best-effort: the release binaries are already attached,
@@ -177,17 +184,15 @@ jobs:
         env:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
-          $version = "${{ needs.manifests.outputs.version }}"
-          $url = "${{ needs.manifests.outputs.url }}"
           # First-party Microsoft tool; avoids depending on a third-party action.
           curl.exe -L -o wingetcreate.exe https://aka.ms/wingetcreate/latest
-          # `update` requires the package to already exist in winget-pkgs; the
-          # very first submission must be made once with `wingetcreate new`.
-          .\wingetcreate.exe update Okoyenta.Sweep `
-            --version $version `
-            --urls "$url" `
-            --submit `
-            --token $env:WINGET_TOKEN
+          # `submit` takes the manifests the `manifests` job already generated.
+          # Unlike `update`, it works for a package that is not yet in
+          # winget-pkgs, so the first release needs no manual step.
+          .\wingetcreate.exe submit `
+            --token $env:WINGET_TOKEN `
+            --prtitle "Okoyenta.Sweep ${{ needs.manifests.outputs.version }}" `
+            manifests/winget
 
   publish-scoop:
     # Pushes the manifest into the scoop bucket repo so `scoop install` works.

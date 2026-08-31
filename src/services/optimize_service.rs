@@ -135,6 +135,29 @@ fn volumes() -> Vec<VolumeInfo> {
     crate::infra::linux::storage::volumes()
 }
 
+/// Map an action to the `Optimize-Volume` switch that performs it.
+///
+/// A dry run always becomes `-Analyze`, which reports fragmentation and trim
+/// state without touching the disk. Returns `None` for an unsupported action so
+/// the caller reports rather than running an arbitrary switch.
+///
+/// Lives outside the `#[cfg(windows)]` block so it is unit-tested on every
+/// platform: this mapping is the difference between trimming a drive and
+/// defragmenting it, and it was previously unreachable from any test.
+pub fn optimize_flag(action: &MaintenanceAction, dry_run: bool) -> Option<&'static str> {
+    if matches!(action, MaintenanceAction::Unsupported(_)) {
+        return None;
+    }
+    if dry_run {
+        return Some("Analyze");
+    }
+    match action {
+        MaintenanceAction::Trim => Some("ReTrim"),
+        MaintenanceAction::Defrag => Some("Defrag"),
+        MaintenanceAction::Unsupported(_) => None,
+    }
+}
+
 #[cfg(windows)]
 fn execute(
     volume: &VolumeInfo,
@@ -146,14 +169,8 @@ fn execute(
     let Some(letter) = storage::drive_letter(&volume.mount) else {
         anyhow::bail!("{} is not a drive-letter volume", volume.mount);
     };
-    let flag = if dry_run {
-        "Analyze"
-    } else {
-        match action {
-            MaintenanceAction::Trim => "ReTrim",
-            MaintenanceAction::Defrag => "Defrag",
-            MaintenanceAction::Unsupported(r) => anyhow::bail!("{r}"),
-        }
+    let Some(flag) = optimize_flag(action, dry_run) else {
+        anyhow::bail!("no maintenance action for {}", volume.mount);
     };
     storage::optimize_volume(letter, flag)
 }
@@ -246,6 +263,43 @@ mod tests {
         let defrag = action_description(&MaintenanceAction::Defrag, "D:\\");
         assert!(defrag.contains("defragment"));
         assert!(defrag.contains("D:\\"));
+    }
+
+    #[test]
+    fn ssd_maps_to_retrim_never_defrag() {
+        // The Optimize-Volume switch is where the SSD/HDD decision physically
+        // takes effect, so it gets the same scrutiny as action_for.
+        let flag = optimize_flag(&MaintenanceAction::Trim, false);
+        assert_eq!(flag, Some("ReTrim"));
+        assert_ne!(flag, Some("Defrag"));
+    }
+
+    #[test]
+    fn hdd_maps_to_defrag() {
+        assert_eq!(
+            optimize_flag(&MaintenanceAction::Defrag, false),
+            Some("Defrag")
+        );
+    }
+
+    #[test]
+    fn dry_run_always_analyzes_whatever_the_media() {
+        // Analyze never modifies the disk, so --analyze must be inert on both.
+        assert_eq!(
+            optimize_flag(&MaintenanceAction::Trim, true),
+            Some("Analyze")
+        );
+        assert_eq!(
+            optimize_flag(&MaintenanceAction::Defrag, true),
+            Some("Analyze")
+        );
+    }
+
+    #[test]
+    fn unsupported_action_has_no_flag_even_on_dry_run() {
+        let unsupported = MaintenanceAction::Unsupported("unknown media".into());
+        assert_eq!(optimize_flag(&unsupported, false), None);
+        assert_eq!(optimize_flag(&unsupported, true), None);
     }
 
     #[test]
