@@ -1,0 +1,198 @@
+name: GUI footprint spike
+
+# Manual only — never runs on push, so it costs nothing until asked for.
+#
+# Measures what a sweep GUI would actually cost, against the two numbers
+# Constitution Principle I cares about:
+#   - binary size (target: single static binary, ~7-8 MB)
+#   - idle RSS     (target: < 50 MB)
+#
+# Local measurement on a Windows dev box gave eframe 3.13 MB / 125 MB RSS but
+# ran the machine out of disk, and could not produce Linux figures at all.
+# CI has the disk and both platforms.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        framework: [eframe, slint, fltk]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux GUI prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          # xvfb gives the probe a display; mesa provides software OpenGL so a
+          # GPU-backed toolkit still starts on a headless runner.
+          sudo apt-get install -y -qq \
+            xvfb libgl1 libegl1 libxkbcommon-x11-0 libxcb-xkb1 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-cursor0 \
+            libwayland-dev libxkbcommon-dev pkg-config cmake
+
+      - name: Generate probe crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe/src
+          # Same release profile as sweep, so numbers are comparable.
+          cat > probe/Cargo.toml <<'EOF'
+          [package]
+          name = "probe"
+          version = "0.1.0"
+          edition = "2021"
+
+          [profile.release]
+          strip = true
+          lto = true
+          codegen-units = 1
+          opt-level = "z"
+
+          [dependencies]
+          EOF
+
+          case "${{ matrix.framework }}" in
+            eframe)
+              echo 'eframe = "0.29"' >> probe/Cargo.toml
+              cat > probe/src/main.rs <<'EOF'
+          fn main() -> eframe::Result<()> {
+              eframe::run_native(
+                  "probe",
+                  eframe::NativeOptions::default(),
+                  Box::new(|_cc| Ok(Box::new(App))),
+              )
+          }
+          struct App;
+          impl eframe::App for App {
+              fn update(&mut self, ctx: &eframe::egui::Context, _f: &mut eframe::Frame) {
+                  eframe::egui::CentralPanel::default()
+                      .show(ctx, |ui| { ui.label("sweep"); });
+              }
+          }
+          EOF
+              ;;
+            slint)
+              # Software renderer: the hypothesis is that skipping the GPU
+              # context is what brings idle RSS under the 50 MB ceiling.
+              echo 'slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software"] }' >> probe/Cargo.toml
+              cat > probe/src/main.rs <<'EOF'
+          slint::slint! {
+              export component Main inherits Window {
+                  width: 400px;
+                  height: 300px;
+                  Text { text: "sweep"; }
+              }
+          }
+          fn main() -> Result<(), slint::PlatformError> {
+              Main::new()?.run()
+          }
+          EOF
+              ;;
+            fltk)
+              echo 'fltk = "1"' >> probe/Cargo.toml
+              cat > probe/src/main.rs <<'EOF'
+          use fltk::{app, frame::Frame, prelude::*, window::Window};
+          fn main() {
+              let a = app::App::default();
+              let mut w = Window::new(100, 100, 400, 300, "probe");
+              Frame::new(0, 0, 400, 300, "sweep");
+              w.end();
+              w.show();
+              a.run().unwrap();
+          }
+          EOF
+              ;;
+          esac
+          echo "--- Cargo.toml ---"
+          cat probe/Cargo.toml
+
+      - name: Build release
+        id: build
+        continue-on-error: true
+        working-directory: probe
+        run: cargo build --release
+
+      - name: Measure binary size
+        id: size
+        if: steps.build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="probe/target/release/probe.exe"
+          else
+            BIN="probe/target/release/probe"
+          fi
+          BYTES=$(stat -c%s "$BIN" 2>/dev/null || stat -f%z "$BIN")
+          MIB=$(awk -v b="$BYTES" 'BEGIN{printf "%.2f", b/1048576}')
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+          echo "mib=$MIB" >> "$GITHUB_OUTPUT"
+          echo "binary: $BYTES bytes = $MIB MiB"
+
+      # RSS is the number that actually decides viability: Principle I caps it
+      # at 50 MB, and a local eframe probe idled at 125 MB.
+      - name: Measure idle RSS (Windows)
+        id: rss_win
+        if: steps.build.outcome == 'success' && runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./probe/target/release/probe.exe &
+          sleep 12
+          LINE=$(tasklist //FI "IMAGENAME eq probe.exe" //FO CSV | tail -1)
+          echo "$LINE"
+          KB=$(echo "$LINE" | awk -F'","' '{print $5}' | tr -d '",K ' | tr -d ',')
+          taskkill //F //IM probe.exe > /dev/null 2>&1 || true
+          MB=$(awk -v k="$KB" 'BEGIN{printf "%.0f", k/1024}')
+          echo "mb=$MB" >> "$GITHUB_OUTPUT"
+          echo "idle RSS: $MB MB"
+
+      - name: Measure idle RSS (Linux)
+        id: rss_linux
+        if: steps.build.outcome == 'success' && runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          xvfb-run -a ./probe/target/release/probe &
+          sleep 12
+          PID=$(pgrep -n probe || true)
+          if [ -z "$PID" ]; then echo "probe did not stay running"; exit 1; fi
+          KB=$(awk '/VmRSS/{print $2}' /proc/$PID/status)
+          kill $PID 2>/dev/null || true
+          MB=$(awk -v k="$KB" 'BEGIN{printf "%.0f", k/1024}')
+          echo "mb=$MB" >> "$GITHUB_OUTPUT"
+          echo "idle RSS: $MB MB"
+
+      - name: Report
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.framework }} on ${{ matrix.os }}"
+            if [ "${{ steps.build.outcome }}" != "success" ]; then
+              echo "- build: **FAILED**"
+            else
+              echo "- binary: **${{ steps.size.outputs.mib || 'n/a' }} MiB** (${{ steps.size.outputs.bytes || 'n/a' }} bytes)"
+              RSS="${{ steps.rss_win.outputs.mb }}${{ steps.rss_linux.outputs.mb }}"
+              if [ -n "$RSS" ]; then
+                echo "- idle RSS: **${RSS} MB** (Principle I ceiling: 50 MB)"
+              else
+                echo "- idle RSS: could not measure"
+              fi
+            fi
+            echo ""
+            echo "_Baseline: sweep CLI 2.98 MB. Size target ~7-8 MB, RSS target < 50 MB._"
+          } >> "$GITHUB_STEP_SUMMARY"
