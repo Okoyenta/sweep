@@ -33,22 +33,14 @@ they have to be done by hand.
 3. Add it to this repo as the secret `WINGET_TOKEN`
    (Settings → Secrets and variables → Actions).
 
-**The first submission must be made manually.** The workflow runs
-`wingetcreate update`, which only works once `Okoyenta.Sweep` already exists in
-winget-pkgs. To create it the first time, run locally on Windows:
-
-```console
-winget install wingetcreate
-wingetcreate new https://github.com/Okoyenta/sweep/releases/download/v0.9.0/sweep-windows-x64.exe
-```
-
-Answer the prompts (publisher `Okoyenta`, package name `sweep`, license `MIT`,
-identifier `Okoyenta.Sweep`), then submit. Once that PR is merged, every later
-tag updates the package automatically.
+That is the only setup step. The workflow runs `wingetcreate submit` against
+the manifests it already generated, which works whether or not `Okoyenta.Sweep`
+exists in winget-pkgs yet — so the first release needs no manual submission.
 
 Expect the first PR to take a few days — winget-pkgs runs automated validation
 and a human review. An unsigned portable exe is accepted, but SmartScreen may
-warn users until the binary builds reputation.
+warn users until the binary builds reputation. Later tags open a new PR each
+time, automatically.
 
 ### 2. scoop (`SCOOP_BUCKET_TOKEN`)
 
