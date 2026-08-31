@@ -154,8 +154,18 @@ jobs:
           sleep 12
           LINE=$(tasklist //FI "IMAGENAME eq probe.exe" //FO CSV | tail -1)
           echo "$LINE"
+          # No match means the window never opened (headless runner, no GL).
+          # Reporting that honestly beats emitting a fabricated 0 MB.
+          if ! echo "$LINE" | grep -q 'probe.exe'; then
+            echo "probe did not stay running (no window on this runner)"
+            exit 1
+          fi
           KB=$(echo "$LINE" | awk -F'","' '{print $5}' | tr -d '",K ' | tr -d ',')
           taskkill //F //IM probe.exe > /dev/null 2>&1 || true
+          if [ -z "$KB" ] || [ "$KB" -eq 0 ]; then
+            echo "could not parse memory usage from: $LINE"
+            exit 1
+          fi
           MB=$(awk -v k="$KB" 'BEGIN{printf "%.0f", k/1024}')
           echo "mb=$MB" >> "$GITHUB_OUTPUT"
           echo "idle RSS: $MB MB"
