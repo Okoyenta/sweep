@@ -4,10 +4,17 @@ on:
   push:
     tags: ['v*']
 
+# The repo default for GITHUB_TOKEN is read-only, which makes creating a release
+# fail with 403. Grant write only to the jobs that actually publish assets.
+permissions:
+  contents: read
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +31,8 @@ jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,6 +52,8 @@ jobs:
     needs: build-windows
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.meta.outputs.version }}
       url: ${{ steps.meta.outputs.url }}
