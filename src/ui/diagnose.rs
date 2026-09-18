@@ -1,6 +1,7 @@
 use std::io::Write;
 
-use crate::domain::models::{DiagnoseReport, DiagnoseRow, RiskLevel};
+use crate::domain::categories::lookup;
+use crate::domain::models::{DeepScanResult, DiagnoseReport, DiagnoseRow, RiskLevel};
 use crate::domain::traits::IndexStore;
 
 pub fn run_diagnose(
@@ -51,82 +52,26 @@ fn build_report(
             }
         }
         if total > 0 {
-            let hint = if cat.id == "dev-pnpm" {
-                Some("pnpm uses hardlinks; sweep runs 'pnpm store prune' for safe reclaim".into())
-            } else {
-                None
-            };
             rows.push(DiagnoseRow {
                 category_id: cat.id.clone(),
                 title: cat.title.clone(),
                 size_bytes: total,
                 risk: cat.risk,
-                reclaimable: true,
-                hint,
+                reclaimable: cat.reclaimable,
+                hint: lookup(&cat.id).and_then(|d| d.hint).map(Into::into),
             });
         }
     }
 
     if deep {
-        let deep_cats = crate::infra::deep_clean::deep_scan();
-        if deep_cats.wu_download_bytes > 0 {
-            rows.push(DiagnoseRow {
-                category_id: "wu-downloads".into(),
-                title: "Windows Update downloads".into(),
-                size_bytes: deep_cats.wu_download_bytes,
-                risk: RiskLevel::System,
-                reclaimable: true,
-                hint: None,
-            });
-        }
-        if deep_cats.do_cache_bytes > 0 {
-            rows.push(DiagnoseRow {
-                category_id: "do-cache".into(),
-                title: "Delivery Optimization cache".into(),
-                size_bytes: deep_cats.do_cache_bytes,
-                risk: RiskLevel::System,
-                reclaimable: true,
-                hint: None,
-            });
-        }
-        if let Some(reclaimable) = deep_cats.winsxs_reclaimable_bytes {
-            if reclaimable > 0 {
-                rows.push(DiagnoseRow {
-                    category_id: "winsxs".into(),
-                    title: "WinSxS reclaimable".into(),
-                    size_bytes: reclaimable,
-                    risk: RiskLevel::System,
-                    reclaimable: true,
-                    hint: None,
-                });
-            }
-        }
-        if deep_cats.driver_store_bytes > 0 {
-            rows.push(DiagnoseRow {
-                category_id: "driver-store".into(),
-                title: "Driver Store".into(),
-                size_bytes: deep_cats.driver_store_bytes,
-                risk: RiskLevel::System,
-                reclaimable: false,
-                hint: Some("Elevated: dism /Online /Cleanup-Image /StartComponentCleanup".into()),
-            });
-        }
+        rows.extend(deep_rows(&crate::infra::deep_clean::deep_scan()));
     }
 
     if index_db_path().exists() {
         let stats = store.stats()?;
         if stats.total_bytes > 0 {
-            rows.push(DiagnoseRow {
-                category_id: "index".into(),
-                title: "Index DB".into(),
-                size_bytes: index_db_path()
-                    .metadata()
-                    .map(|m| m.len())
-                    .unwrap_or(0),
-                risk: RiskLevel::System,
-                reclaimable: false,
-                hint: Some("Managed by sweep; use 'sweep index --full' to rebuild".into()),
-            });
+            let size = index_db_path().metadata().map(|m| m.len()).unwrap_or(0);
+            rows.push(registry_row("index", size));
         }
     }
 
@@ -161,6 +106,34 @@ fn build_report(
         system_reclaimable,
         idle: None,
     })
+}
+
+/// A row whose id, title, risk, reclaimability and hint all come from the
+/// category registry, so diagnose and clean cannot disagree about it.
+fn registry_row(id: &str, size_bytes: u64) -> DiagnoseRow {
+    let d = lookup(id).unwrap_or_else(|| panic!("category '{id}' is not in the registry"));
+    DiagnoseRow {
+        category_id: d.id.into(),
+        title: d.title.into(),
+        size_bytes,
+        risk: d.risk,
+        reclaimable: d.reclaimable,
+        hint: d.hint.map(Into::into),
+    }
+}
+
+/// Rows for the deep (system) categories that have something to report.
+fn deep_rows(deep: &DeepScanResult) -> Vec<DiagnoseRow> {
+    [
+        ("wu-downloads", deep.wu_download_bytes),
+        ("do-cache", deep.do_cache_bytes),
+        ("winsxs", deep.winsxs_reclaimable_bytes.unwrap_or(0)),
+        ("driver-store", deep.driver_store_bytes),
+    ]
+    .into_iter()
+    .filter(|&(_, bytes)| bytes > 0)
+    .map(|(id, bytes)| registry_row(id, bytes))
+    .collect()
 }
 
 fn print_report(report: &DiagnoseReport, w: &mut impl Write) -> std::io::Result<()> {
@@ -304,5 +277,50 @@ mod tests {
         assert!(lines[2].contains("cargo cache"));
         assert!(lines[2].contains("Safe"));
         assert!(lines[2].contains("Yes"));
+    }
+
+    fn all_deep() -> DeepScanResult {
+        DeepScanResult {
+            wu_download_bytes: 1,
+            do_cache_bytes: 1,
+            winsxs_reclaimable_bytes: Some(1),
+            driver_store_bytes: 1,
+            driver_store_oldest_days: None,
+        }
+    }
+
+    #[test]
+    fn deep_rows_take_verdicts_from_registry() {
+        let rows = deep_rows(&all_deep());
+        assert_eq!(rows.len(), 4);
+        for row in &rows {
+            let d = lookup(&row.category_id).unwrap();
+            assert_eq!(row.reclaimable, d.reclaimable, "{}", row.category_id);
+            assert_eq!(row.risk, d.risk, "{}", row.category_id);
+        }
+        let ds = rows.iter().find(|r| r.category_id == "driver-store").unwrap();
+        assert!(!ds.reclaimable);
+        assert!(ds.hint.as_deref().unwrap().contains("dism"));
+    }
+
+    /// Regression for clean-diagnose-divergence: every category clean can
+    /// discover carries the reclaimable verdict diagnose reports for that id,
+    /// and clean never offers a report-only category.
+    #[test]
+    fn clean_categories_match_diagnose_verdicts() {
+        use crate::services::clean_service::discover_with_policy;
+
+        let deep_diag = deep_rows(&all_deep());
+        for deep in [false, true] {
+            for cat in discover_with_policy(None, None, deep).categories {
+                if let Some(d) = lookup(&cat.id) {
+                    assert_eq!(cat.reclaimable, d.reclaimable, "{}", cat.id);
+                }
+                if let Some(row) = deep_diag.iter().find(|r| r.category_id == cat.id) {
+                    assert_eq!(cat.reclaimable, row.reclaimable, "{}", cat.id);
+                }
+                assert!(cat.reclaimable, "clean offers report-only {}", cat.id);
+            }
+        }
     }
 }

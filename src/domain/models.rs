@@ -108,6 +108,9 @@ pub struct CleanCategory {
     /// when set, sweep runs this shell command instead of trashing files
     /// (used for pnpm store, which uses hardlinks that don't free on trash)
     pub cleanup_command: Option<String>,
+    /// false = report only; `CleanService::run` skips it instead of removing
+    /// anything (see `domain::categories`)
+    pub reclaimable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +122,8 @@ pub struct CategoryScan {
     pub files: u64,
     /// copied from CleanCategory; run this command instead of trashing if set
     pub cleanup_command: Option<String>,
+    /// copied from CleanCategory; false = never remove, report as skipped
+    pub reclaimable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,6 +137,8 @@ pub struct CleanOutcome {
     /// successfully trashed items, recorded so the caller can append an
     /// [`UndoSession`] to the journal for `sweep undo`
     pub undo_items: Vec<UndoItem>,
+    /// categories that were selected but not touched, as (id, reason)
+    pub skipped: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default)]

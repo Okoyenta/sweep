@@ -30,7 +30,7 @@ pub fn scan() -> DeepScanResult {
         }
     }
 
-    let driver_store = std::path::PathBuf::from("C:\\Windows\\System32\\DriverStore\\FileRepository");
+    let driver_store = crate::domain::categories::driver_store_path();
     if driver_store.exists() {
         let (bytes, oldest_days) = driver_store_info(&driver_store);
         result.driver_store_bytes = bytes;

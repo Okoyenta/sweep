@@ -59,6 +59,9 @@ pub fn print_outcome(outcome: &CleanOutcome, dry_run: bool) {
         fmt(outcome.removed_bytes),
         outcome.failed_items
     );
+    for (id, reason) in &outcome.skipped {
+        println!("skipped {id}: {reason}");
+    }
 }
 
 pub fn print_benchmark(sample: &BenchmarkSample) {
