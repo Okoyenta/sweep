@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::models::{CleanCategory, RiskLevel};
+use crate::domain::categories::category;
+use crate::domain::models::CleanCategory;
 
 /// builds cleanable categories under the given cache root; each root's
 /// children become removal candidates (see CleanCategory docs)
@@ -19,13 +20,7 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
     ];
     for (id, title, root) in browser_caches {
         if root.exists() {
-            cats.push(CleanCategory {
-                id: id.into(),
-                title: title.into(),
-                roots: vec![root],
-                risk: RiskLevel::Safe,
-                cleanup_command: None,
-            });
+            cats.push(category(id, vec![root]));
         }
     }
 
@@ -39,13 +34,7 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
                 .filter(|p| p.exists())
                 .collect();
             if !roots.is_empty() {
-                cats.push(CleanCategory {
-                    id: "firefox-cache".into(),
-                    title: "Firefox cache".into(),
-                    roots,
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category("firefox-cache", roots));
             }
         }
     }
@@ -58,13 +47,7 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
         if let Some(sub) = sub {
             let root = cache_home.join(sub);
             if root.exists() {
-                cats.push(CleanCategory {
-                    id: id.into(),
-                    title: title.into(),
-                    roots: vec![root],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category(id, vec![root]));
             }
         }
     }
@@ -73,13 +56,7 @@ pub fn build_categories(cache_home: &Path) -> Vec<CleanCategory> {
     if let Some(home) = std::env::var_os("HOME") {
         let npm_root = PathBuf::from(home).join(".npm").join("_cacache");
         if npm_root.exists() {
-            cats.push(CleanCategory {
-                id: "npm-cache".into(),
-                title: "npm package cache".into(),
-                roots: vec![npm_root],
-                risk: RiskLevel::Safe,
-                cleanup_command: None,
-            });
+            cats.push(category("npm-cache", vec![npm_root]));
         }
     }
 

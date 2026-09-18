@@ -114,6 +114,7 @@ impl<R: PathRemover> CleanService<R> {
                     total_bytes,
                     items,
                     cleanup_command: cat.cleanup_command.clone(),
+                    reclaimable: cat.reclaimable,
                 }
             })
             .collect()
@@ -167,6 +168,7 @@ impl<R: PathRemover> CleanService<R> {
                     total_bytes,
                     items,
                     cleanup_command: cat.cleanup_command.clone(),
+                    reclaimable: cat.reclaimable,
                 }
             })
             .collect();
@@ -186,6 +188,15 @@ impl<R: PathRemover> CleanService<R> {
                 } else if !ids.iter().any(|id| id == &scan.category_id) {
                     continue;
                 }
+            }
+            // Report-only categories (e.g. the Driver Store) are measured but
+            // never removed, whatever the caller selected.
+            if !scan.reclaimable {
+                outcome.skipped.push((
+                    scan.category_id.clone(),
+                    "report-only category; sweep never removes it".into(),
+                ));
+                continue;
             }
             if let Some(ref cmd) = scan.cleanup_command {
                 let status = if cfg!(windows) {
@@ -342,6 +353,7 @@ mod tests {
             roots: vec![base.clone()],
             risk: crate::domain::models::RiskLevel::Safe,
             cleanup_command: None,
+            reclaimable: true,
         }];
         let svc = CleanService::new(CountingRemover(AtomicUsize::new(0)));
         let scans = svc.scan(&cats);
@@ -363,6 +375,7 @@ mod tests {
                 total_bytes: 100,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
             CategoryScan {
                 category_id: "do".into(),
@@ -371,6 +384,7 @@ mod tests {
                 total_bytes: 0,
                 files: 2,
                 cleanup_command: None,
+                reclaimable: true,
             },
         ];
         let remover = RecordingRemover {
@@ -395,10 +409,49 @@ mod tests {
             roots: vec![std::env::temp_dir().join("sweep-does-not-exist-xyz")],
             risk: crate::domain::models::RiskLevel::Safe,
             cleanup_command: None,
+            reclaimable: true,
         }];
         let svc = CleanService::new(CountingRemover(AtomicUsize::new(0)));
         let scans = svc.scan(&cats);
         assert!(scans[0].items.is_empty());
         assert_eq!(scans[0].total_bytes, 0);
+    }
+
+    #[test]
+    fn scan_carries_reclaimable_flag() {
+        let base = temp_tree("flag");
+        let cats = vec![crate::domain::categories::category("driver-store", vec![base.clone()])];
+        let svc = CleanService::new(CountingRemover(AtomicUsize::new(0)));
+        let scans = svc.scan(&cats);
+        assert!(!scans[0].reclaimable);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn run_skips_and_reports_non_reclaimable_categories() {
+        let base = temp_tree("skip");
+        let scans = vec![CategoryScan {
+            category_id: "driver-store".into(),
+            title: "Driver Store".into(),
+            items: vec![base.join("a.bin"), base.join("sub")],
+            total_bytes: 150,
+            files: 2,
+            // a command must not bypass the check either
+            cleanup_command: Some("exit 0".into()),
+            reclaimable: false,
+        }];
+        let remover = CountingRemover(AtomicUsize::new(0));
+        let svc = CleanService::new(remover);
+        // selected explicitly, as `clean --only driver-store -y` would
+        let out = svc.run(&scans, Some(&["driver-store".into()])).unwrap();
+
+        assert_eq!(svc.remover.0.load(Ordering::SeqCst), 0);
+        assert_eq!(out.removed_items, 0);
+        assert_eq!(out.failed_items, 0);
+        assert!(out.undo_items.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].0, "driver-store");
+        assert!(base.join("a.bin").exists());
+        let _ = fs::remove_dir_all(&base);
     }
 }

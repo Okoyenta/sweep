@@ -207,7 +207,13 @@ pub fn rule_packs_to_categories(
     deep: bool,
 ) -> Vec<CleanCategory> {
     let mut out = Vec::new();
-    let mut seen: Vec<String> = builtin.iter().map(|c| c.id.clone()).collect();
+    // Registry ids are reserved even when the built-in was not discovered
+    // here (e.g. report-only `driver-store`), so a pack cannot claim one.
+    let mut seen: Vec<String> = builtin
+        .iter()
+        .map(|c| c.id.clone())
+        .chain(crate::domain::categories::REGISTRY.iter().map(|d| d.id.to_string()))
+        .collect();
     for pack in packs {
         if pack.risk == RiskLevel::System && !deep {
             continue;
@@ -228,6 +234,17 @@ pub fn rule_packs_to_categories(
         if roots.is_empty() {
             continue;
         }
+        if let Some(bad) = roots
+            .iter()
+            .find(|r| crate::infra::trash_remover::is_protected_system_path(r))
+        {
+            eprintln!(
+                "rule pack '{}' targets {} under %SystemRoot%\\System32; skipping",
+                pack.id,
+                bad.display()
+            );
+            continue;
+        }
         seen.push(pack.id.clone());
         out.push(CleanCategory {
             id: pack.id.clone(),
@@ -235,6 +252,7 @@ pub fn rule_packs_to_categories(
             roots,
             risk: pack.risk,
             cleanup_command: pack.cleanup_command.clone(),
+            reclaimable: true,
         });
     }
     out
@@ -254,6 +272,7 @@ mod tests {
             roots: roots.iter().map(PathBuf::from).collect(),
             risk: RiskLevel::Safe,
             cleanup_command: None,
+            reclaimable: true,
         }
     }
 
@@ -362,6 +381,29 @@ mod tests {
             cleanup_command: None,
         };
         assert!(rule_packs_to_categories(&[pack], &builtin, false).is_empty());
+    }
+
+    #[test]
+    fn rule_pack_cannot_claim_a_registry_id() {
+        let pack = RulePackCategory {
+            id: "driver-store".into(),
+            roots: vec![std::env::temp_dir()],
+            risk: RiskLevel::Safe,
+            cleanup_command: None,
+        };
+        assert!(rule_packs_to_categories(&[pack], &[], true).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rule_pack_under_system32_is_rejected() {
+        let pack = RulePackCategory {
+            id: "my-drivers".into(),
+            roots: vec![crate::domain::categories::driver_store_path()],
+            risk: RiskLevel::System,
+            cleanup_command: None,
+        };
+        assert!(rule_packs_to_categories(&[pack], &[], true).is_empty());
     }
 
     #[test]

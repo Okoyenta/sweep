@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use crate::domain::models::{CleanCategory, RiskLevel};
+use crate::domain::categories::category;
+use crate::domain::models::CleanCategory;
 
 fn local_appdata() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
@@ -32,73 +33,27 @@ fn discover_categories_inner(deep: bool) -> Vec<CleanCategory> {
     cats.extend(crate::infra::dev_caches::discover_dev_categories());
 
     if let Some(root) = children_root(&lad, &["Temp"]) {
-        cats.push(CleanCategory {
-            id: "user-temp".into(),
-            title: "User temp files".into(),
-            roots: vec![root],
-            risk: RiskLevel::Safe,
-            cleanup_command: None,
-        });
+        cats.push(category("user-temp", vec![root]));
     }
 
     if let Some(root) = children_root(&lad, &["CrashDumps"]) {
-        cats.push(CleanCategory {
-            id: "crash-dumps".into(),
-            title: "Crash dumps".into(),
-            roots: vec![root],
-            risk: RiskLevel::Safe,
-            cleanup_command: None,
-        });
+        cats.push(category("crash-dumps", vec![root]));
     }
 
-    let browser_caches: Vec<(&str, &str, &[&str])> = vec![
-        (
-            "chrome-cache",
-            "Google Chrome cache",
-            &["Google", "Chrome", "User Data", "Default", "Cache"],
-        ),
-        (
-            "chrome-code-cache",
-            "Google Chrome code cache",
-            &["Google", "Chrome", "User Data", "Default", "Code Cache"],
-        ),
-        (
-            "chrome-gpu",
-            "Google Chrome GPU cache",
-            &["Google", "Chrome", "User Data", "Default", "GPUCache"],
-        ),
-        (
-            "edge-cache",
-            "Microsoft Edge cache",
-            &["Microsoft", "Edge", "User Data", "Default", "Cache"],
-        ),
-        (
-            "edge-code-cache",
-            "Microsoft Edge code cache",
-            &["Microsoft", "Edge", "User Data", "Default", "Code Cache"],
-        ),
-        (
-            "npm-cache",
-            "npm package cache",
-            &["npm-cache"],
-        ),
-        (
-            "pip-cache",
-            "pip package cache",
-            &["pip", "cache"],
-        ),
+    let browser_caches: Vec<(&str, &[&str])> = vec![
+        ("chrome-cache", &["Google", "Chrome", "User Data", "Default", "Cache"]),
+        ("chrome-code-cache", &["Google", "Chrome", "User Data", "Default", "Code Cache"]),
+        ("chrome-gpu", &["Google", "Chrome", "User Data", "Default", "GPUCache"]),
+        ("edge-cache", &["Microsoft", "Edge", "User Data", "Default", "Cache"]),
+        ("edge-code-cache", &["Microsoft", "Edge", "User Data", "Default", "Code Cache"]),
+        ("npm-cache", &["npm-cache"]),
+        ("pip-cache", &["pip", "cache"]),
     ];
 
-    for (id, title, sub) in browser_caches {
+    for (id, sub) in browser_caches {
         if let Some(root) = children_root(&lad, &sub) {
             if root.exists() {
-                cats.push(CleanCategory {
-                    id: id.into(),
-                    title: title.into(),
-                    roots: vec![root],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category(id, vec![root]));
             }
         }
     }
@@ -112,13 +67,7 @@ fn discover_categories_inner(deep: bool) -> Vec<CleanCategory> {
                 .filter(|p| p.exists())
                 .collect();
             if !roots.is_empty() {
-                cats.push(CleanCategory {
-                    id: "firefox-cache".into(),
-                    title: "Firefox cache".into(),
-                    roots,
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category("firefox-cache", roots));
             }
         }
     }
@@ -131,13 +80,7 @@ fn discover_categories_inner(deep: bool) -> Vec<CleanCategory> {
                 .join("SoftwareDistribution")
                 .join("Download");
             if wu_path.exists() {
-                cats.push(CleanCategory {
-                    id: "wu-downloads".into(),
-                    title: "Windows Update downloads".into(),
-                    roots: vec![wu_path],
-                    risk: RiskLevel::System,
-                    cleanup_command: None,
-                });
+                cats.push(category("wu-downloads", vec![wu_path]));
             }
         }
 
@@ -147,27 +90,40 @@ fn discover_categories_inner(deep: bool) -> Vec<CleanCategory> {
                 .join("Windows")
                 .join("DeliveryOptimization");
             if do_path.exists() {
-                cats.push(CleanCategory {
-                    id: "do-cache".into(),
-                    title: "Delivery Optimization cache".into(),
-                    roots: vec![do_path],
-                    risk: RiskLevel::System,
-                    cleanup_command: None,
-                });
+                cats.push(category("do-cache", vec![do_path]));
             }
         }
 
-        let driver_store = PathBuf::from("C:\\Windows\\System32\\DriverStore\\FileRepository");
-        if driver_store.exists() {
-            cats.push(CleanCategory {
-                id: "driver-store".into(),
-                title: "Driver Store".into(),
-                roots: vec![driver_store],
-                risk: RiskLevel::System,
-                cleanup_command: None,
-            });
-        }
+        // The Driver Store is deliberately absent: it is report-only
+        // (`reclaimable: false` in `domain::categories`) and only diagnose
+        // measures it. Removing package directories corrupts it.
     }
 
     cats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::categories::{lookup, system_root};
+
+    #[test]
+    fn deep_discovery_never_offers_report_only_or_system32_categories() {
+        let system32 = system_root().join("System32").to_string_lossy().to_lowercase();
+        for cat in discover_categories_deep() {
+            let entry = lookup(&cat.id)
+                .unwrap_or_else(|| panic!("category '{}' is not in the registry", cat.id));
+            assert_eq!(cat.reclaimable, entry.reclaimable, "{}", cat.id);
+            assert!(cat.reclaimable, "clean discovered report-only category '{}'", cat.id);
+            assert_ne!(cat.id, "driver-store");
+            for root in &cat.roots {
+                assert!(
+                    !root.to_string_lossy().to_lowercase().starts_with(&system32),
+                    "{} root {} is under System32",
+                    cat.id,
+                    root.display()
+                );
+            }
+        }
+    }
 }

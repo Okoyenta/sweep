@@ -32,7 +32,7 @@ impl DiagnoseService {
                 title: s.title.clone(),
                 size_bytes: s.total_bytes,
                 risk: RiskLevel::Safe,
-                reclaimable: true,
+                reclaimable: s.reclaimable,
                 hint: None,
             })
             .collect();
@@ -66,6 +66,7 @@ mod tests {
                 total_bytes: 100,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
             CategoryScan {
                 category_id: "large".into(),
@@ -74,6 +75,7 @@ mod tests {
                 total_bytes: 1000,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
             CategoryScan {
                 category_id: "medium".into(),
@@ -82,6 +84,7 @@ mod tests {
                 total_bytes: 500,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
         ];
         let report = DiagnoseService::build_report(&scans);
@@ -100,6 +103,7 @@ mod tests {
                 total_bytes: 100,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
             CategoryScan {
                 category_id: "b".into(),
@@ -108,6 +112,7 @@ mod tests {
                 total_bytes: 200,
                 files: 1,
                 cleanup_command: None,
+                reclaimable: true,
             },
         ];
         let report = DiagnoseService::build_report(&scans);
@@ -130,6 +135,7 @@ mod tests {
             total_bytes: 50,
             files: 1,
             cleanup_command: None,
+            reclaimable: true,
         }];
         let report = DiagnoseService::build_report(&scans);
         assert_eq!(report.rows[0].risk, RiskLevel::Safe);

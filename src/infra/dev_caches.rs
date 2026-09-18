@@ -1,6 +1,15 @@
 use std::path::PathBuf;
 
-use crate::domain::models::{CleanCategory, RiskLevel};
+use crate::domain::categories::category;
+use crate::domain::models::CleanCategory;
+
+/// pnpm's store is hardlinked, so trashing frees nothing; prune it instead.
+fn pnpm_category(root: PathBuf) -> CleanCategory {
+    CleanCategory {
+        cleanup_command: Some("pnpm store prune".into()),
+        ..category("dev-pnpm", vec![root])
+    }
+}
 
 pub fn discover_dev_categories() -> Vec<CleanCategory> {
     let mut cats = Vec::new();
@@ -13,13 +22,7 @@ pub fn discover_dev_categories() -> Vec<CleanCategory> {
         if !_local.is_empty() {
             let pnpm = PathBuf::from(&_local).join("pnpm").join("store");
             if pnpm.exists() {
-                cats.push(CleanCategory {
-                    id: "dev-pnpm".into(),
-                    title: "pnpm store".into(),
-                    roots: vec![pnpm],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: Some("pnpm store prune".into()),
-                });
+                cats.push(pnpm_category(pnpm));
             }
         }
     }
@@ -28,25 +31,13 @@ pub fn discover_dev_categories() -> Vec<CleanCategory> {
         if !home.is_empty() {
             let pnpm = PathBuf::from(&home).join(".local/share/pnpm/store");
             if pnpm.exists() {
-                cats.push(CleanCategory {
-                    id: "dev-pnpm".into(),
-                    title: "pnpm store".into(),
-                    roots: vec![pnpm],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: Some("pnpm store prune".into()),
-                });
+                cats.push(pnpm_category(pnpm));
             }
             if let Ok(pnpm_home) = std::env::var("PNPM_HOME") {
                 if !pnpm_home.is_empty() {
                     let store = PathBuf::from(&pnpm_home).join("store");
                     if store.exists() && !cats.iter().any(|c| c.id == "dev-pnpm") {
-            cats.push(CleanCategory {
-                    id: "dev-pnpm".into(),
-                    title: "pnpm store".into(),
-                    roots: vec![store],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: Some("pnpm store prune".into()),
-                });
+                        cats.push(pnpm_category(store));
                     }
                 }
             }
@@ -64,26 +55,14 @@ pub fn discover_dev_categories() -> Vec<CleanCategory> {
             roots.push(cargo_git);
         }
         if !roots.is_empty() {
-            cats.push(CleanCategory {
-                id: "dev-cargo".into(),
-                title: "cargo cache".into(),
-                roots,
-                risk: RiskLevel::Safe,
-                cleanup_command: None,
-            });
+            cats.push(category("dev-cargo", roots));
         }
     }
 
     if !home.is_empty() {
         let gradle = PathBuf::from(&home).join(".gradle/caches");
         if gradle.exists() {
-            cats.push(CleanCategory {
-                id: "dev-gradle".into(),
-                title: "gradle caches".into(),
-                roots: vec![gradle],
-                risk: RiskLevel::Safe,
-                cleanup_command: None,
-            });
+            cats.push(category("dev-gradle", vec![gradle]));
         }
     }
 
@@ -92,23 +71,11 @@ pub fn discover_dev_categories() -> Vec<CleanCategory> {
         if !home.is_empty() {
             let uv = PathBuf::from(&home).join(".local/share/uv");
             if uv.exists() {
-                cats.push(CleanCategory {
-                    id: "dev-uv".into(),
-                    title: "uv cache".into(),
-                    roots: vec![uv],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category("dev-uv", vec![uv]));
             }
             let pipx = PathBuf::from(&home).join(".local/share/pipx");
             if pipx.exists() {
-                cats.push(CleanCategory {
-                    id: "dev-pipx".into(),
-                    title: "pipx cache".into(),
-                    roots: vec![pipx],
-                    risk: RiskLevel::Safe,
-                    cleanup_command: None,
-                });
+                cats.push(category("dev-pipx", vec![pipx]));
             }
         }
     }
