@@ -1,0 +1,5 @@
+# The npm launcher is executed directly on Unix, where the kernel reads the
+# `#!` line — a CRLF there turns the interpreter into `/usr/bin/env node\r` and
+# fails with "bad interpreter". The publish job runs on Linux, but pinning LF
+# keeps that true regardless of who packs the tarball or with what git config.
+npm/** text eol=lf
