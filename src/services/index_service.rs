@@ -49,6 +49,46 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// What the last indexing run is entitled to speak for.
+///
+/// Every answer `dupes` and `status` give is an answer about this scope, not
+/// about the disk: an index that is two weeks old and saw an eighth of the
+/// volume will report `no duplicate groups found` with perfect confidence, and
+/// a reader has no way to tell that from a real negative.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexProvenance {
+    /// When the last run finished, or `None` if the index has never completed one.
+    pub last_run_unix: Option<i64>,
+    /// The roots that run walked, empty for an index built before they were recorded.
+    pub roots: Vec<PathBuf>,
+    /// The last run stopped before finishing, so its figures are a lower bound.
+    pub interrupted: bool,
+}
+
+/// Read the provenance of the last run from any store.
+pub fn read_provenance(store: &dyn IndexStore) -> anyhow::Result<IndexProvenance> {
+    Ok(IndexProvenance {
+        // An unparseable stamp is not a run we can date; degrade to "never".
+        last_run_unix: store.meta_get("last_run")?.and_then(|v| v.parse().ok()),
+        roots: store
+            .meta_get("last_run_roots")?
+            .filter(|v| !v.is_empty())
+            .map(|v| v.split(';').map(PathBuf::from).collect())
+            .unwrap_or_default(),
+        interrupted: store.meta_get("last_run_interrupted")?.as_deref() == Some("1"),
+    })
+}
+
+/// Roots as a single meta value. `;` cannot appear in a Windows path, and the
+/// value is only ever read back to be displayed.
+fn join_roots(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 pub struct IndexService<S: IndexStore> {
     store: S,
     cfg: IndexConfig,
@@ -68,10 +108,12 @@ impl<S: IndexStore> IndexService<S> {
     }
 
     pub fn last_run(&self) -> anyhow::Result<Option<i64>> {
-        Ok(self
-            .store
-            .meta_get("last_run")?
-            .and_then(|v| v.parse().ok()))
+        Ok(read_provenance(&self.store)?.last_run_unix)
+    }
+
+    /// What the last run covered, not just when it ran.
+    pub fn provenance(&self) -> anyhow::Result<IndexProvenance> {
+        read_provenance(&self.store)
     }
 
     pub fn run(
@@ -99,8 +141,10 @@ impl<S: IndexStore> IndexService<S> {
 
         let mut walker = IncrementalWalker::new(self.cfg.roots.clone(), self.cfg.walker.clone());
 
+        let mut interrupted = false;
         while let Some(listing) = walker.next_listing(&self.store) {
             if cancel.load(Ordering::Relaxed) {
+                interrupted = true;
                 break;
             }
             let readable = listing.readable;
@@ -128,7 +172,16 @@ impl<S: IndexStore> IndexService<S> {
             p.dirs_skipped = walker.dirs_skipped();
             p.finished_at_unix = Some(now_secs());
         }
+        // Record what the run covered as well as when it ran. Without a scope,
+        // nothing downstream can tell a complete index from a partial one.
         self.store.meta_set("last_run", &now_secs().to_string())?;
+        self.store
+            .meta_set("last_run_roots", &join_roots(&self.cfg.roots))?;
+        // A run stopped by `cancel` used to stamp `last_run` exactly as a
+        // finished one did, so the provenance line would call a partial walk
+        // complete.
+        self.store
+            .meta_set("last_run_interrupted", if interrupted { "1" } else { "0" })?;
 
         Ok(progress.lock().unwrap().clone())
     }

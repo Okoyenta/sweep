@@ -19,7 +19,7 @@ pub fn print_report(report: &DoctorReport) {
 
 /// Write the report to `w`, one contract field per line.
 pub fn write_report(report: &DoctorReport, w: &mut impl Write) -> std::io::Result<()> {
-    writeln!(w, "reserve: {}", reserve_label(report.reserve_status))?;
+    writeln!(w, "reserve: {}", reserve_line(report))?;
     writeln!(w, "elevation: {}", elevation_label(report.elevation))?;
     writeln!(w, "toast: {}", toast_label(report.toast))?;
     writeln!(
@@ -81,6 +81,38 @@ fn reserve_label(status: ReserveStatus) -> &'static str {
         ReserveStatus::Ok => "ok",
         ReserveStatus::Missing => "missing",
         ReserveStatus::Consumed => "consumed",
+        // Distinct from `consumed`: that is a reserve spent on purpose, this is one
+        // that failed to allocate and must not be mistaken for a working net.
+        ReserveStatus::Partial => "partial",
+        ReserveStatus::HeldBelowHeadroom => "below-headroom",
+    }
+}
+
+/// Render the reserve line, including the numbers that make the verdict checkable.
+///
+/// The status token always occupies the same position so existing parsers keep
+/// working; the parenthetical is the only part that varies in shape.
+fn reserve_line(report: &DoctorReport) -> String {
+    let held = fmt(report.reserve_held_bytes);
+    let free = fmt(report.reserve_free_bytes);
+    let label = reserve_label(report.reserve_status);
+    match report.reserve_status {
+        ReserveStatus::Ok => format!("{label} ({held} held, {free} free)"),
+        ReserveStatus::HeldBelowHeadroom => format!(
+            "{label} ({held} held, {free} free) — below headroom, so this space is needed \
+             now; the next `sweep clean` will release it"
+        ),
+        ReserveStatus::Partial => format!(
+            "{label} ({held} held, {free} free) — allocation failed, the net is not armed; \
+             retry with `sweep index`"
+        ),
+        ReserveStatus::Missing => format!(
+            "{label} ({free} free) — no reserve yet; `sweep index` or `sweep status` will \
+             create one if there is room"
+        ),
+        ReserveStatus::Consumed => {
+            format!("{label} ({free} free) — released by a previous disk-full rescue")
+        }
     }
 }
 
@@ -113,6 +145,8 @@ mod tests {
     fn report() -> DoctorReport {
         DoctorReport {
             reserve_status: ReserveStatus::Ok,
+            reserve_held_bytes: 512 * 1024 * 1024,
+            reserve_free_bytes: 8 * 1024 * 1024 * 1024,
             elevation: ElevationStatus::Elevated,
             toast: ToastStatus::Available,
             guard_armed: true,
@@ -181,5 +215,46 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("guard: not armed"));
         assert!(out.contains("sweep schedule --guard-install"));
+    }
+
+    #[test]
+    fn healthy_reserve_line_reports_held_and_free() {
+        let mut buf = Vec::new();
+        write_report(&report(), &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let line = out.lines().next().unwrap();
+        assert!(line.starts_with("reserve: ok"), "got: {line}");
+        assert!(line.contains("512.00 MiB held"), "got: {line}");
+        assert!(line.contains("8.00 GiB free"), "got: {line}");
+    }
+
+    /// The bug this pins down: a full-size reserve on a nearly-full disk used to
+    /// print a bare `ok`, which read as a healthy posture at the one moment the
+    /// reserve should have been released.
+    #[test]
+    fn reserve_held_below_headroom_is_not_reported_as_ok() {
+        let mut r = report();
+        r.reserve_status = ReserveStatus::HeldBelowHeadroom;
+        r.reserve_free_bytes = 237 * 1024 * 1024;
+        let mut buf = Vec::new();
+        write_report(&r, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let line = out.lines().next().unwrap();
+        assert!(line.starts_with("reserve: below-headroom"), "got: {line}");
+        assert!(!line.starts_with("reserve: ok"), "got: {line}");
+        assert!(line.contains("237.00 MiB free"), "got: {line}");
+    }
+
+    #[test]
+    fn partial_reserve_is_distinct_from_consumed() {
+        let mut r = report();
+        r.reserve_status = ReserveStatus::Partial;
+        r.reserve_held_bytes = 0;
+        let mut buf = Vec::new();
+        write_report(&r, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let line = out.lines().next().unwrap();
+        assert!(line.starts_with("reserve: partial"), "got: {line}");
+        assert!(line.contains("allocation failed"), "got: {line}");
     }
 }

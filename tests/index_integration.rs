@@ -115,6 +115,55 @@ fn full_incremental_cycle() {
     assert!(last_run.is_some());
 }
 
+/// A finished run records what it covered, so a later answer can say how much
+/// of the disk it is entitled to speak for.
+#[test]
+fn a_completed_run_records_its_roots_and_is_not_interrupted() {
+    let tree = TempTree::new("provenance");
+    tree.write("a.txt", "0123456789");
+    settle();
+
+    let mut svc = service_for(&tree.root, SqliteStore::open_in_memory().unwrap());
+    run_index(&mut svc);
+
+    let prov = svc.provenance().unwrap();
+    assert!(prov.last_run_unix.is_some());
+    assert_eq!(prov.roots, vec![tree.root.clone()]);
+    assert!(!prov.interrupted, "a run that finished is not partial");
+}
+
+/// The bug this pins down: a run stopped by `cancel` stamped `last_run` exactly
+/// as a finished one did, so the provenance line would call a partial walk
+/// complete and present a lower bound as the answer.
+#[test]
+fn a_cancelled_run_is_recorded_as_interrupted() {
+    let tree = TempTree::new("cancelled");
+    tree.write("a.txt", "0123456789");
+    settle();
+
+    let mut svc = service_for(&tree.root, SqliteStore::open_in_memory().unwrap());
+    let cancel = AtomicBool::new(true); // cancelled before the first listing
+    svc.run(&cancel, &Mutex::new(Default::default()), None)
+        .unwrap();
+
+    let prov = svc.provenance().unwrap();
+    assert!(
+        prov.interrupted,
+        "a cancelled run must not be reported as a completed one"
+    );
+}
+
+/// An index built before the scope was recorded has no roots, which is the
+/// signal the provenance line uses to decline to claim a share of the disk.
+#[test]
+fn provenance_without_recorded_roots_reports_an_empty_scope() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let prov = sweep::services::index_service::read_provenance(&store).unwrap();
+    assert_eq!(prov.last_run_unix, None);
+    assert!(prov.roots.is_empty());
+    assert!(!prov.interrupted);
+}
+
 #[test]
 fn walker_respects_excludes_and_missing_roots() {
     let tree = TempTree::new("exclude");

@@ -30,6 +30,7 @@ mod tests {
             read_bytes: 0,
             write_bytes: 0,
             total_written_bytes: 0,
+            start_unix: 1_700_000_000,
         }
     }
 

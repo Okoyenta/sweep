@@ -79,6 +79,7 @@ impl SystemMonitor for SysinfoMonitor {
                     read_bytes: disk.read_bytes,
                     write_bytes: disk.written_bytes,
                     total_written_bytes: disk.total_written_bytes,
+                    start_unix: proc.start_time(),
                 }
             })
             .collect();
