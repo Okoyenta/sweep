@@ -1,0 +1,36 @@
+{
+  "name": "@okoyenta/sweep",
+  "version": "0.0.0",
+  "description": "Monitor and free disk space and RAM",
+  "license": "MIT",
+  "homepage": "https://github.com/Okoyenta/sweep",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Okoyenta/sweep.git",
+    "directory": "npm/sweep"
+  },
+  "bugs": {
+    "url": "https://github.com/Okoyenta/sweep/issues"
+  },
+  "bin": {
+    "sweep": "bin/sweep.js"
+  },
+  "files": [
+    "bin/sweep.js"
+  ],
+  "keywords": [
+    "cli",
+    "disk-space",
+    "memory",
+    "cleanup",
+    "windows",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@okoyenta/sweep-linux-x64": "0.0.0",
+    "@okoyenta/sweep-win32-x64": "0.0.0"
+  }
+}

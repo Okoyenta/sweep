@@ -260,3 +260,92 @@ jobs:
           git add bucket/sweep.json
           git commit -m "sweep ${{ needs.manifests.outputs.version }}"
           git push
+
+  publish-npm:
+    # Publishes the CLI so `npm install -g @okoyenta/sweep` works.
+    # Skips silently when NPM_TOKEN is not configured — see docs/DISTRIBUTION.md.
+    needs: [build-linux, build-windows, manifests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for npm token
+        id: gate
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=npm skipped::NPM_TOKEN secret is not set; the package was not published. See docs/DISTRIBUTION.md."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Fetch release binaries
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          # Retry: the assets can take a moment to become downloadable.
+          for attempt in 1 2 3 4 5; do
+            if curl -sSfL -o npm/sweep-win32-x64/sweep.exe "$BASE/sweep-windows-x64.exe"; then break; fi
+            sleep 10
+          done
+          for attempt in 1 2 3 4 5; do
+            if curl -sSfL -o npm/sweep-linux-x64/sweep "$BASE/sweep-linux-x64"; then break; fi
+            sleep 10
+          done
+          # A retry loop that never succeeds leaves the file absent, which
+          # `set -e` does not catch inside an `if`; assert the downloads landed.
+          test -s npm/sweep-win32-x64/sweep.exe
+          test -s npm/sweep-linux-x64/sweep
+          # npm preserves the mode it packs, and the launcher execs this directly.
+          chmod +x npm/sweep-linux-x64/sweep
+
+      - name: Stamp version from the tag
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          # The tag is the single source of truth: the repo keeps 0.0.0
+          # placeholders so there is no second version to forget.
+          node -e '
+            const fs = require("node:fs");
+            const version = process.argv[1];
+            const edit = (file, mutate) => {
+              const json = JSON.parse(fs.readFileSync(file, "utf8"));
+              mutate(json);
+              fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n");
+            };
+            edit("npm/sweep/package.json", (json) => {
+              json.version = version;
+              for (const name of Object.keys(json.optionalDependencies)) {
+                json.optionalDependencies[name] = version;
+              }
+            });
+            edit("npm/sweep-win32-x64/package.json", (json) => { json.version = version; });
+            edit("npm/sweep-linux-x64/package.json", (json) => { json.version = version; });
+          ' "${{ needs.manifests.outputs.version }}"
+
+      - name: Publish to npm
+        if: steps.gate.outputs.ready == 'true'
+        # Best-effort like the other publish jobs: the release assets are already
+        # attached, so a registry hiccup must not mark the release failed.
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Platform packages first: the launcher's optionalDependencies point
+          # at them, and npm resolves those when the launcher is installed.
+          for dir in npm/sweep-win32-x64 npm/sweep-linux-x64 npm/sweep; do
+            echo "publishing $dir"
+            (cd "$dir" && npm publish --access public)
+          done

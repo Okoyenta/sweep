@@ -1,0 +1,21 @@
+{
+  "name": "@okoyenta/sweep-win32-x64",
+  "version": "0.0.0",
+  "description": "The sweep binary for Windows x64. Installed automatically by @okoyenta/sweep.",
+  "license": "MIT",
+  "homepage": "https://github.com/Okoyenta/sweep",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Okoyenta/sweep.git",
+    "directory": "npm/sweep-win32-x64"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "sweep.exe"
+  ]
+}

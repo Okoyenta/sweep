@@ -1,7 +1,7 @@
 # Distribution
 
 How a tagged release reaches users, and the one-time setup needed to make
-`winget install` and `scoop install` work.
+`winget install`, `scoop install` and `npm install -g` work.
 
 ## What happens on a `v*` tag
 
@@ -14,15 +14,20 @@ Pushing a tag like `v0.9.0` runs `.github/workflows/release.yml`:
 | `manifests` | generates winget + scoop manifests, attaches them, uploads them as a workflow artifact |
 | `publish-winget` | opens a PR against `microsoft/winget-pkgs` — **only if `WINGET_TOKEN` is set** |
 | `publish-scoop` | commits the manifest to the scoop bucket repo — **only if `SCOOP_BUCKET_TOKEN` is set** |
+| `publish-npm` | publishes the launcher + two platform packages to npm — **only if `NPM_TOKEN` is set** |
 
-Without the two secrets, the release still publishes both binaries and both
+Without the three secrets, the release still publishes both binaries and both
 manifests; the publish jobs skip with a notice in the run summary. Nothing
 fails. This is deliberate — attaching working binaries is the critical path,
 and package-manager submission is best-effort on top of it.
 
+> Re-running a release job for a tag that already published will fail with a
+> "version already exists" error from npm. That is caught by the same
+> `continue-on-error` policy and does not fail the release.
+
 ## One-time setup
 
-Neither publish job can work until these exist. They require account access, so
+No publish job can work until these exist. They require account access, so
 they have to be done by hand.
 
 ### 1. winget (`WINGET_TOKEN`)
@@ -61,6 +66,58 @@ scoop install sweep
 
 Unlike winget, there is no review queue — the first tagged release after setup
 publishes immediately.
+
+### 3. npm (`NPM_TOKEN`)
+
+The packages live under the `@okoyenta` scope, so publishing needs an account
+that owns it. The unscoped name `sweep` is **taken** by an unrelated package
+(`bredele/sweep`, v0.1.0) — hence the scope.
+
+1. `npm login` as an account named `okoyenta`, or one that is a member of an
+   `okoyenta` org with write access.
+2. Create an **Automation** token (npmjs.com → Access Tokens). Automation
+   tokens are the ones that bypass 2FA prompts, which is what CI needs.
+3. Add it here as the secret `NPM_TOKEN`.
+
+Users then install with:
+
+```console
+npm install -g @okoyenta/sweep
+```
+
+## The npm packages
+
+Three packages, all published from `npm/`:
+
+| Directory | Package | Contents |
+| --- | --- | --- |
+| `npm/sweep` | `@okoyenta/sweep` | the launcher `bin/sweep.js` — this is what users install |
+| `npm/sweep-win32-x64` | `@okoyenta/sweep-win32-x64` | `sweep.exe` |
+| `npm/sweep-linux-x64` | `@okoyenta/sweep-linux-x64` | `sweep` |
+
+The launcher is a short Node script that resolves the platform-matching package
+and runs its binary, forwarding stdout/stderr and the exit code. The binary
+arrives as an **optional dependency** gated by each package's `os` and `cpu`
+fields, so npm fetches only the matching one and **there is no install-time
+download script** — the layout esbuild and biome use. That matters because a
+download script breaks behind strict proxies and in offline installs; here
+`npm install` only ever talks to the registry.
+
+No binary is committed: the `publish-npm` job downloads both release assets into
+the platform directories before packing, so what npm ships is byte-identical to
+what GitHub ships.
+
+**Versions are stamped from the tag.** All three `package.json` files carry
+`0.0.0` placeholders, and the job rewrites them — plus the launcher's
+`optionalDependencies` — from the tag name. Keeping a second version number in
+sync with `Cargo.toml` by hand is a thing that gets forgotten.
+
+`engines.node` is `>=18`, and Node is needed only to run the launcher; `sweep`
+itself is a static native binary.
+
+**Not covered:** there is no ARM build, so `win32-arm64` and `linux-arm64`
+install the launcher and then exit with a message pointing at building from
+source.
 
 ## Does it end up on PATH?
 

@@ -6,6 +6,12 @@
 *.rs.bk
 *.pdb
 
+# npm — the platform binaries are release assets, fetched by the publish job
+# rather than committed (see docs/DISTRIBUTION.md).
+node_modules/
+npm/sweep-win32-x64/sweep.exe
+npm/sweep-linux-x64/sweep
+
 # Local sweep config used while testing exclusions/rule packs
 /sweep.toml
 

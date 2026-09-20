@@ -30,6 +30,12 @@ Once the package is published, winget is the intended install path and puts
 winget install Okoyenta.Sweep
 ```
 
+Or through npm (needs Node 18+), which installs the same binary:
+
+```console
+npm install -g @okoyenta/sweep
+```
+
 Package-manager install is wired up in the release workflow but needs one-time
 account setup before it works — see
 [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md). There is no MSI/Inno installer
