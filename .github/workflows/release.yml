@@ -104,13 +104,17 @@ jobs:
           PackageIdentifier: Okoyenta.Sweep
           PackageVersion: $VERSION
           InstallerType: portable
+          # winget ignores PortableCommandAlias for a single-file portable —
+          # it only reads that field from NestedInstallerFiles, i.e. for
+          # archive-based portables. The Links alias is resolved from
+          # Commands, else --rename, else the downloaded file's name; without
+          # Commands the command installs as \`sweep-windows-x64\`.
+          Commands:
+            - sweep
           Installers:
             - Architecture: x64
               InstallerUrl: ${{ steps.meta.outputs.url }}
               InstallerSha256: ${{ steps.meta.outputs.sha256 }}
-              # Without this, winget names the command after the downloaded
-              # file and users would have to type \`sweep-windows-x64\`.
-              PortableCommandAlias: sweep
           ManifestType: installer
           ManifestVersion: 1.6.0
           EOF

@@ -78,9 +78,12 @@ sweep doctor
 ```
 
 The command is `sweep`, not `sweep-windows-x64`, because the installer manifest
-sets `PortableCommandAlias: sweep`. Without that field winget derives the
-command name from the downloaded file name — worth remembering if the release
-asset is ever renamed.
+sets `Commands: [sweep]`. For a single-file portable winget resolves the alias
+from `Commands`, then `--rename`, then the downloaded file's name.
+`PortableCommandAlias` does **not** apply here — winget only reads that field
+from `NestedInstallerFiles`, i.e. for archive-based portables, and its validator
+reports it as an unknown field on a single-file portable. Worth remembering if
+the release asset is ever renamed.
 
 **scoop.** Shims go in `~/scoop/shims`, which is on `PATH` from the moment
 scoop is installed. The `bin` entry in the manifest maps the exe to `sweep`.
