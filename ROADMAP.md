@@ -16,7 +16,10 @@ scan optimization). See `README.md` for what exists today.
   not notify-only). Safe categories include npm/pip/pnpm caches.
 - If free space is still below minimum **after** the cache rescue:
   **auto-purge the Recycle Bin** (with its own toast).
-- Defaults: RAM ≥ 90 %, disk < 2 GB free, poll every 30 s.
+- Defaults: RAM ≥ 90 %, disk < 2 GB free, poll every 30 s. This 2 GB is the guard's
+  action threshold and is deliberately separate from the reserve's own thresholds
+  (`HEADROOM_THRESHOLD_BYTES` 256 MB to release, `RECREATION_THRESHOLD_BYTES` 1 GB to
+  re-arm — `src/domain/models.rs` is the source of truth).
 - License: **MIT** (`LICENSE` file + `license = "MIT"` in Cargo.toml).
 
 **Core loop** (`sweep guard [--ram-threshold 90] [--disk-min-gb 2] [--interval-secs 30] [--once] [--allow-service-stop] [--allow-kill]`)

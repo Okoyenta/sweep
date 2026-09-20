@@ -34,6 +34,25 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Rewrite the database so freed pages return to the filesystem.
+    ///
+    /// `clear` and `delete_paths` only return pages to SQLite's internal freelist,
+    /// which the file keeps — so a cleared index stays exactly as large on disk,
+    /// permanently. Only `VACUUM` shrinks it. That rewrite needs free space roughly
+    /// equal to the current database, so callers must check before calling.
+    pub fn compact(&self) -> anyhow::Result<()> {
+        // `VACUUM` cannot run inside a transaction; `execute_batch` opens none, and
+        // the statements run in order, so this is safe as written.
+        self.conn
+            .execute_batch("VACUUM;")
+            .context("compacting index db (VACUUM)")?;
+        // Fold the WAL back into the main file, otherwise most of the shrink hides
+        // in a sidecar the caller never inspects. Best-effort: a concurrent reader
+        // can block the checkpoint, and a still-large -wal is not a failure.
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok(())
+    }
+
     fn migrate(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(
             "BEGIN;
@@ -267,6 +286,104 @@ mod tests {
         store.clear()?;
         let stats = store.stats()?;
         assert_eq!(stats.files + stats.dirs, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_returns_freed_pages_to_the_filesystem() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("sweep-compact-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db = dir.join("index.db");
+
+        // Measure only between connections. In WAL mode the rows live in the -wal
+        // sidecar until the last connection checkpoints it back on close, so a size
+        // read while the store is open understates the real footprint — which is
+        // exactly how a 366 MiB index reads as 4 KiB.
+        let on_disk = |db: &Path| std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
+
+        {
+            let mut store = SqliteStore::open(&db)?;
+            let batch: Vec<EntryRecord> = (0..20_000)
+                .map(|i| rec(&format!("C:/bulk/file-{i}.bin"), 4096, 100, false))
+                .collect();
+            store.upsert_entries(&batch)?;
+        }
+        let grown = on_disk(&db);
+        assert!(
+            grown > 4096,
+            "expected the index to occupy real space, got {grown}"
+        );
+
+        {
+            let mut store = SqliteStore::open(&db)?;
+            store.clear()?;
+        }
+        let after_clear = on_disk(&db);
+
+        {
+            let store = SqliteStore::open(&db)?;
+            store.compact()?;
+        }
+        let after_compact = on_disk(&db);
+
+        // The point of the bug: `clear` frees pages to SQLite's freelist but the
+        // file keeps them, so an index that reads as empty is still large on disk
+        // and no existing command could get that space back.
+        assert!(
+            after_clear >= grown,
+            "clear alone must not shrink the file: {grown} -> {after_clear}"
+        );
+        assert!(
+            after_compact < after_clear,
+            "compact should return the pages: {after_clear} -> {after_compact}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// Why the `index` category's hint names `--compact` and not `--full`.
+    ///
+    /// `sweep index --full` is `clear` plus a re-walk, and `clear` returns pages
+    /// to SQLite's freelist while the file keeps them. So a rebuild cannot give
+    /// space back — it is a command that does not act on the number printed on
+    /// its own row.
+    #[test]
+    fn rebuild_after_clear_does_not_shrink_the_index() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("sweep-rebuild-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db = dir.join("index.db");
+        let on_disk = |db: &Path| std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
+
+        {
+            let mut store = SqliteStore::open(&db)?;
+            let batch: Vec<EntryRecord> = (0..20_000)
+                .map(|i| rec(&format!("C:/bulk/file-{i}.bin"), 4096, 100, false))
+                .collect();
+            store.upsert_entries(&batch)?;
+        }
+        let first = on_disk(&db);
+
+        // A `--full` rebuild: everything deleted, then re-indexed.
+        {
+            let mut store = SqliteStore::open(&db)?;
+            store.clear()?;
+            let smaller: Vec<EntryRecord> = (0..1_000)
+                .map(|i| rec(&format!("C:/few/file-{i}.bin"), 4096, 100, false))
+                .collect();
+            store.upsert_entries(&smaller)?;
+        }
+        let rebuilt = on_disk(&db);
+
+        // The index went from 20,000 rows to 1,000 and did not give back a byte.
+        assert!(
+            rebuilt >= first,
+            "a rebuild must not be expected to shrink the file: {first} -> {rebuilt}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod guard;
 pub mod idle;
 pub mod optimize;
+pub mod provenance;
 pub mod ram;
 pub mod status;
 pub mod tui;

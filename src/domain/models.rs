@@ -26,6 +26,13 @@ pub struct ProcessMemInfo {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub total_written_bytes: u64,
+    /// When this process started, seconds since the epoch.
+    ///
+    /// Deliberately not "when this exe was last launched": that comes from the
+    /// usage probes, which unelevated can only see programs the Windows shell
+    /// started, so it read `unknown` for most of a top-RAM table. A process's
+    /// own start time is always available.
+    pub start_unix: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -424,8 +431,14 @@ pub struct CategoryEstimate {
 /// Pre-flight safety snapshot produced by `sweep doctor`.
 #[derive(Debug, Clone)]
 pub struct DoctorReport {
-    /// reserve file status: ok / missing / consumed
+    /// reserve file status: ok / missing / consumed / partial / held below headroom
     pub reserve_status: ReserveStatus,
+    /// bytes the reserve file currently occupies (0 when absent)
+    pub reserve_held_bytes: u64,
+    /// free bytes on the volume holding the index and reserve. Reported alongside
+    /// the status because file size alone cannot say whether holding the reserve
+    /// is currently the right thing to do.
+    pub reserve_free_bytes: u64,
     /// whether sweep is running elevated
     pub elevation: ElevationStatus,
     /// whether toast notifications are available
@@ -448,9 +461,20 @@ pub struct DoctorReport {
 /// Reserve file status reported by `sweep doctor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReserveStatus {
+    /// Full-size file on a volume with room to spare — the net is armed and costs
+    /// nothing that is currently needed.
     Ok,
+    /// No file, and sweep has never run here, so it was never created.
     Missing,
+    /// No file on a machine that has a data dir, i.e. a previous run released it.
     Consumed,
+    /// File present but under full size: an allocation that failed partway, which
+    /// is not the same thing as one that was deliberately released.
+    Partial,
+    /// Full-size file on a volume below `HEADROOM_THRESHOLD_BYTES`. Size alone
+    /// reads as healthy, but this is space the next write needs — the reserve is
+    /// held exactly where it should be released.
+    HeldBelowHeadroom,
 }
 
 /// Elevation status reported by `sweep doctor`.

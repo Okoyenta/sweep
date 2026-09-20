@@ -1,9 +1,10 @@
 //! Applying user exclusions to discovered clean categories.
 //!
 //! Exclusions are honored across every cleaning path (diagnose, clean, guard):
-//! a category whose id is excluded, or whose roots fall under an excluded path
-//! or glob, is dropped *before* size calculation so excluded space is never
-//! counted or touched.
+//! a category whose id is excluded, or all of whose roots fall under an
+//! excluded path or glob, is dropped *before* size calculation so excluded
+//! space is never counted or touched. Excluded roots of a multi-root category
+//! (e.g. one browser profile) are removed individually.
 
 use std::path::{Path, PathBuf};
 
@@ -22,20 +23,30 @@ pub fn apply_exclusions(
     let mut kept = Vec::new();
     let mut excluded = 0;
     for cat in categories {
-        if is_excluded(cat, excl) {
+        if excl.category_ids.iter().any(|id| id == &cat.id) {
             excluded += 1;
             continue;
         }
-        kept.push(cat.clone());
+        // Drop excluded roots one by one: a category with a root per browser
+        // profile must keep the other profiles when one is excluded. The
+        // category itself goes only when no root survives, which is the old
+        // behaviour for single-root categories.
+        let roots: Vec<PathBuf> = cat
+            .roots
+            .iter()
+            .filter(|root| !is_path_excluded(root, excl))
+            .cloned()
+            .collect();
+        if roots.is_empty() {
+            excluded += 1;
+            continue;
+        }
+        kept.push(CleanCategory {
+            roots,
+            ..cat.clone()
+        });
     }
     (kept, excluded)
-}
-
-fn is_excluded(cat: &CleanCategory, excl: &ExclusionConfig) -> bool {
-    if excl.category_ids.iter().any(|id| id == &cat.id) {
-        return true;
-    }
-    cat.roots.iter().any(|root| is_path_excluded(root, excl))
 }
 
 /// True when `path` is covered by an excluded path or glob.
@@ -305,6 +316,41 @@ mod tests {
         };
         let (kept, n) = apply_exclusions(&cats, &excl);
         assert_eq!(kept.len(), 0);
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn excluding_one_root_keeps_the_rest_of_a_multi_root_category() {
+        let base = std::env::temp_dir().join("sweep-multiroot");
+        let default = base.join("Default").join("Cache");
+        let other = base.join("Profile 1").join("Cache");
+        let cats = vec![CleanCategory {
+            roots: vec![default.clone(), other],
+            ..cat("chrome-cache", &[])
+        }];
+        let excl = ExclusionConfig {
+            paths: vec![base.join("Profile 1")],
+            ..Default::default()
+        };
+        let (kept, n) = apply_exclusions(&cats, &excl);
+        assert_eq!(n, 0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].roots, vec![default]);
+    }
+
+    #[test]
+    fn excluding_every_root_drops_the_category() {
+        let base = std::env::temp_dir().join("sweep-multiroot-all");
+        let cats = vec![CleanCategory {
+            roots: vec![base.join("Default").join("Cache"), base.join("Profile 1").join("Cache")],
+            ..cat("chrome-cache", &[])
+        }];
+        let excl = ExclusionConfig {
+            paths: vec![base.clone()],
+            ..Default::default()
+        };
+        let (kept, n) = apply_exclusions(&cats, &excl);
+        assert!(kept.is_empty());
         assert_eq!(n, 1);
     }
 

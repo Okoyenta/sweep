@@ -35,6 +35,10 @@ pub enum Command {
         status: bool,
         #[arg(long)]
         full: bool,
+        /// run SQLite VACUUM to return deleted pages to the filesystem; needs
+        /// roughly the current index size in free space
+        #[arg(long)]
+        compact: bool,
         #[arg(long)]
         roots: Vec<PathBuf>,
     },

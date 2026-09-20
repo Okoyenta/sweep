@@ -300,7 +300,12 @@ mod tests {
         }
         let ds = rows.iter().find(|r| r.category_id == "driver-store").unwrap();
         assert!(!ds.reclaimable);
-        assert!(ds.hint.as_deref().unwrap().contains("dism"));
+        // This assertion used to require "dism" here, which pinned the bug: the
+        // Driver Store's own tool is pnputil, and DISM's component cleanup
+        // services WinSxS, a different store.
+        let hint = ds.hint.as_deref().unwrap();
+        assert!(hint.contains("pnputil"), "driver-store hint: {hint}");
+        assert!(!hint.contains("dism"), "driver-store hint: {hint}");
     }
 
     /// Regression for clean-diagnose-divergence: every category clean can

@@ -2,10 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use byte_unit::{Byte, UnitType};
 
-use crate::domain::models::{AppUsage, SystemSnapshot};
-use crate::services::usage_service::UsageMap;
+use crate::domain::models::{ProcessMemInfo, SystemSnapshot};
 
-pub type UsageLookup<'a> = Option<&'a UsageMap>;
+/// Column header for the process table's last cell.
+const PROCESS_HEADER: &str = "STARTED";
 
 pub fn fmt(bytes: u64) -> String {
     let unit = Byte::from_u64(bytes).get_appropriate_unit(UnitType::Binary);
@@ -52,7 +52,24 @@ fn ago(unix: i64, now: i64) -> String {
     }
 }
 
-pub fn print_status(snap: &SystemSnapshot, usage: UsageLookup) -> anyhow::Result<()> {
+/// One row of the process table.
+///
+/// The last cell is the process's own start time, not the exe's last-launch
+/// time. The launch history lives in the usage probes, and unelevated those can
+/// only see programs the Windows shell started — which excludes the browsers
+/// and editors that make up most of a top-RAM table, so the column read
+/// `unknown` for every row and looked like a fact about the machine.
+fn process_row(p: &ProcessMemInfo, now: i64) -> String {
+    format!(
+        "  {:>8}  {:<26} {:>10}  {}",
+        p.pid,
+        truncate(&p.name, 26),
+        fmt(p.memory_bytes),
+        ago(p.start_unix as i64, now)
+    )
+}
+
+pub fn print_status(snap: &SystemSnapshot) -> anyhow::Result<()> {
     let m = &snap.memory;
     println!("memory");
     println!(
@@ -91,33 +108,12 @@ pub fn print_status(snap: &SystemSnapshot, usage: UsageLookup) -> anyhow::Result
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    match usage {
-        Some(map) => {
-            println!("  {:>8}  {:<26} {:>10}  {}", "PID", "NAME", "MEM", "LAST RUN");
-            for p in &snap.top_processes {
-                let last = map
-                    .get(&p.name.to_lowercase())
-                    .map_or("unknown".to_string(), |u: &AppUsage| ago(u.last_run_unix, now));
-                println!(
-                    "  {:>8}  {:<26} {:>10}  {}",
-                    p.pid,
-                    truncate(&p.name, 26),
-                    fmt(p.memory_bytes),
-                    last
-                );
-            }
-        }
-        None => {
-            println!("  {:>8}  {:<28} {}", "PID", "NAME", "MEM");
-            for p in &snap.top_processes {
-                println!(
-                    "  {:>8}  {:<28} {}",
-                    p.pid,
-                    truncate(&p.name, 28),
-                    fmt(p.memory_bytes)
-                );
-            }
-        }
+    println!(
+        "  {:>8}  {:<26} {:>10}  {}",
+        "PID", "NAME", "MEM", PROCESS_HEADER
+    );
+    for p in &snap.top_processes {
+        println!("{}", process_row(p, now));
     }
 
     Ok(())
@@ -129,5 +125,54 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let cut: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(pid: u32, name: &str, mem: u64, start_unix: u64) -> ProcessMemInfo {
+        ProcessMemInfo {
+            pid,
+            name: name.into(),
+            memory_bytes: mem,
+            read_bytes: 0,
+            write_bytes: 0,
+            total_written_bytes: 0,
+            start_unix,
+        }
+    }
+
+    /// The bug: every cell of the old `LAST RUN` column read `unknown`, because
+    /// the usage probes cannot see shell-external launches. No process row may
+    /// contain that word now — the start time is always known.
+    #[test]
+    fn every_process_row_reports_a_start_time_not_unknown() {
+        let now = 1_800_000_000i64;
+        for start in [now as u64 - 30, now as u64 - 7200, now as u64 - 3 * 86_400] {
+            let row = process_row(&proc(20112, "chrome.exe", 159_600_000, start), now);
+            assert!(!row.contains("unknown"), "got: {row}");
+            assert!(row.contains("chrome.exe"), "got: {row}");
+        }
+    }
+
+    #[test]
+    fn process_row_picks_the_right_age_bucket() {
+        let now = 1_800_000_000i64;
+        let cell = |secs: i64| process_row(&proc(1, "x.exe", 1, (now - secs) as u64), now);
+        // `ends_with` rather than a last-token compare: "just now" is two words.
+        assert!(cell(30).ends_with("just now"), "got: {}", cell(30));
+        assert!(cell(7200).ends_with("2h ago"), "got: {}", cell(7200));
+        assert!(cell(3 * 86_400).ends_with("3d ago"), "got: {}", cell(3 * 86_400));
+    }
+
+    /// A clock skewed behind the process start must not underflow into a
+    /// nonsensical age.
+    #[test]
+    fn a_future_start_time_reads_as_just_now() {
+        let now = 1_800_000_000i64;
+        let row = process_row(&proc(1, "x.exe", 1, now as u64 + 60_000), now);
+        assert!(row.ends_with("just now"), "got: {row}");
     }
 }

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::domain::models::{
     CategoryEstimate, DoctorReport, ElevationStatus, ReserveStatus, ToastStatus,
-    RESERVE_SIZE_BYTES,
+    HEADROOM_THRESHOLD_BYTES, RESERVE_SIZE_BYTES,
 };
 
 /// Service that builds the `sweep doctor` pre-flight report.
@@ -41,6 +41,9 @@ impl DoctorService {
         let guard_probe = std::thread::spawn(guard_armed);
         let idle_probe = std::thread::spawn(idle_offender_count);
         let volume_probe = std::thread::spawn(volumes);
+        // Enumerating disks is cheap but not free, so it joins the thread set
+        // rather than adding its cost to the main thread's budget.
+        let reserve_probe = std::thread::spawn(reserve_status);
 
         let (would_clean, would_clean_partial) =
             would_clean_estimate(config_override, rules_override, SIZING_BUDGET);
@@ -53,9 +56,14 @@ impl DoctorService {
         let guard_armed = guard_probe.join().unwrap_or(false);
         let idle_offender_count = idle_probe.join().unwrap_or(0);
         let volumes = volume_probe.join().unwrap_or_default();
+        let (reserve_status, reserve_held_bytes, reserve_free_bytes) = reserve_probe
+            .join()
+            .unwrap_or((ReserveStatus::Missing, 0, 0));
 
         DoctorReport {
-            reserve_status: reserve_status(),
+            reserve_status,
+            reserve_held_bytes,
+            reserve_free_bytes,
             elevation,
             toast,
             guard_armed,
@@ -81,24 +89,51 @@ impl Default for DoctorService {
     }
 }
 
-/// Classify the disk-full reserve file.
+/// Classify the reserve file from its size, the volume's free space, and whether
+/// sweep has run here before.
 ///
-/// A full-size file is `Ok`. If the file is gone but sweep's data dir exists,
-/// sweep has run before and the reserve was consumed by a disk-full rescue;
-/// with no data dir at all it was simply never created.
-fn reserve_status() -> ReserveStatus {
-    let path = crate::infra::paths::reserve_path();
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.len() >= RESERVE_SIZE_BYTES => ReserveStatus::Ok,
-        Ok(_) => ReserveStatus::Consumed,
-        Err(_) => {
-            if crate::infra::paths::data_dir().exists() {
+/// Split away from the filesystem reads so every branch is exercised by a table.
+/// The below-headroom case only occurs on a disk too full to reproduce on demand,
+/// which is exactly the state that went unreported — leaving it untestable would
+/// risk it going unreported again.
+fn classify_reserve(
+    file_len: Option<u64>,
+    free_bytes: u64,
+    data_dir_exists: bool,
+) -> ReserveStatus {
+    match file_len {
+        Some(len) if len >= RESERVE_SIZE_BYTES => {
+            // Size alone says "armed"; free space says whether arming it is still
+            // the right call. Below headroom this is space the next write needs.
+            if free_bytes < HEADROOM_THRESHOLD_BYTES {
+                ReserveStatus::HeldBelowHeadroom
+            } else {
+                ReserveStatus::Ok
+            }
+        }
+        // Present but short: an allocation that ran out of disk partway, which is
+        // not a deliberate release and must not be reported as one.
+        Some(_) => ReserveStatus::Partial,
+        None => {
+            if data_dir_exists {
                 ReserveStatus::Consumed
             } else {
                 ReserveStatus::Missing
             }
         }
     }
+}
+
+/// Read the reserve file and classify it. Returns `(status, bytes held, bytes free)`.
+fn reserve_status() -> (ReserveStatus, u64, u64) {
+    let free = crate::infra::paths::free_bytes_on_index_volume();
+    // A stat failure (missing file, or a permission error) is indistinguishable
+    // from absent as far as the report is concerned.
+    let len = std::fs::metadata(crate::infra::paths::reserve_path())
+        .ok()
+        .map(|meta| meta.len());
+    let status = classify_reserve(len, free, crate::infra::paths::data_dir().exists());
+    (status, len.unwrap_or(0), free)
 }
 
 #[cfg(windows)]
@@ -196,6 +231,8 @@ mod tests {
         let total: u64 = would_clean.iter().map(|c| c.size_bytes).sum();
         let report = DoctorReport {
             reserve_status: ReserveStatus::Ok,
+            reserve_held_bytes: 0,
+            reserve_free_bytes: 0,
             elevation: ElevationStatus::Not,
             toast: ToastStatus::Unavailable,
             guard_armed: false,
@@ -210,6 +247,57 @@ mod tests {
             report.would_clean.iter().map(|c| c.size_bytes).sum::<u64>()
         );
         assert_eq!(report.would_clean_total_bytes, 375);
+    }
+
+    /// Every reserve state, including the one the bug was about.
+    ///
+    /// The below-headroom row is the regression test: a full-size file on a disk
+    /// below `HEADROOM_THRESHOLD_BYTES` used to classify as `Ok` purely on size,
+    /// so doctor reported a healthy reserve at the one moment it should have been
+    /// released.
+    #[test]
+    fn reserve_classification_covers_every_state() {
+        use crate::domain::models::RECREATION_THRESHOLD_BYTES;
+
+        let full = RESERVE_SIZE_BYTES;
+        let roomy = RECREATION_THRESHOLD_BYTES;
+        let tight = HEADROOM_THRESHOLD_BYTES - 1;
+
+        assert_eq!(
+            classify_reserve(Some(full), roomy, true),
+            ReserveStatus::Ok,
+            "full reserve with room to spare is armed and harmless"
+        );
+        assert_eq!(
+            classify_reserve(Some(full), tight, true),
+            ReserveStatus::HeldBelowHeadroom,
+            "full reserve below headroom must not read as ok"
+        );
+        assert_eq!(
+            classify_reserve(Some(full), HEADROOM_THRESHOLD_BYTES, true),
+            ReserveStatus::Ok,
+            "the headroom boundary itself still counts as roomy"
+        );
+        assert_eq!(
+            classify_reserve(Some(0), roomy, true),
+            ReserveStatus::Partial,
+            "a zero-length stub is a failed allocation, not a release"
+        );
+        assert_eq!(
+            classify_reserve(Some(full - 1), roomy, true),
+            ReserveStatus::Partial,
+            "anything under full size is a partial allocation"
+        );
+        assert_eq!(
+            classify_reserve(None, roomy, true),
+            ReserveStatus::Consumed,
+            "absent on a machine that has a data dir means a previous rescue"
+        );
+        assert_eq!(
+            classify_reserve(None, roomy, false),
+            ReserveStatus::Missing,
+            "absent with no data dir means sweep never ran here"
+        );
     }
 
     // Live probe: spawns the elevation/toast probes and walks real cache roots.

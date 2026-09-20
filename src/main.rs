@@ -7,7 +7,7 @@ use clap::Parser;
 use sweep::domain::models::BenchmarkSample;
 use sweep::domain::traits::{IndexStore, UsageProbe};
 use sweep::infra::paths::{
-    index_db_path, ensure_reserve, consume_reserve, try_recreate_reserve,
+    index_db_path, try_recreate_reserve, consume_reserve,
     free_bytes_on_index_volume, ensure_headroom_or_consume_reserve, is_disk_full_error,
 };
 use sweep::infra::sqlite_store::SqliteStore;
@@ -30,8 +30,9 @@ fn main() -> Result<()> {
         Some(Command::Index {
             status,
             full,
+            compact,
             roots,
-        }) => run_index(status, full, roots),
+        }) => run_index(status, full, compact, roots),
         Some(Command::Apps {
             since_days,
             uninstall,
@@ -868,10 +869,28 @@ fn run_dupes(min_mb: u64, trash_group: Option<usize>, yes: bool) -> Result<()> {
         anyhow::bail!("no index yet; run `sweep index` first");
     }
     let store = open_store()?;
+    // Read what the index covers before the finder takes ownership of the
+    // store. Every answer below is an answer about this index, not about the
+    // disk: a stale index that saw an eighth of the volume reports "no
+    // duplicates" with the same confidence as a complete one.
+    let provenance = match (
+        sweep::services::index_service::read_provenance(&store),
+        store.stats(),
+    ) {
+        (Ok(prov), Ok(stats)) => sweep::ui::provenance::index_provenance(
+            &prov,
+            stats.total_bytes,
+            sweep::ui::provenance::now_unix(),
+        ),
+        // Not silent: an undisclosed index is the failure this line exists to
+        // prevent, so say the disclosure itself failed.
+        _ => "index: coverage unavailable — results below may be stale or partial".to_string(),
+    };
     let finder = DupFinder::new(store, StdFileHasher::new());
     let groups = finder.find(min_mb * 1024 * 1024, 200)?;
     if groups.is_empty() {
         println!("no duplicate groups found (>= {} MiB)", min_mb);
+        println!("{provenance}");
         return Ok(());
     }
 
@@ -891,6 +910,9 @@ fn run_dupes(min_mb: u64, trash_group: Option<usize>, yes: bool) -> Result<()> {
         }
     }
     println!("\n{} groups, {} reclaimable", groups.len(), fmt(wasted_total));
+    // A stale positive misleads the same way a stale negative does: it is a
+    // lower bound being read as the whole answer.
+    println!("{provenance}");
 
     let Some(target) = trash_group else {
         return Ok(());
@@ -972,28 +994,33 @@ fn run_diagnose(
 }
 
 fn run_status(top: usize) -> Result<()> {
-    let _ = ensure_reserve();
+    // Recreate the reserve only when there is room to spare. `status` reclaims
+    // nothing, so an unconditional create here would hand back the 512 MiB a
+    // `clean` just freed and drop the volume back under the headroom threshold.
+    try_recreate_reserve();
     let mut service = SystemService::new(sweep::infra::sysinfo_monitor::SysinfoMonitor::new());
     let snap = service.status_report(top)?;
 
-    let usage_service = sweep::services::usage_service::UsageService::new(usage_probes());
-    let usage_map = usage_service.collect_map();
-
-    sweep::ui::status::print_status(&snap, Some(&usage_map))?;
+    sweep::ui::status::print_status(&snap)?;
 
     if let Some(store) = open_store_with_reserve() {
-        if let Ok(stats) = store.stats() {
-            println!(
-                "\nindex: {} files, {} folders, {} cataloged (last run: {})",
-                stats.files,
-                stats.dirs,
-                fmt(stats.total_bytes),
-                store
-                    .meta_get("last_run")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "never".to_string())
-            );
+        // One line, saying what the index holds *and* how much of the disk that
+        // is. The file and folder counts belong to `sweep index --status`; what
+        // matters here is that nothing below the memory table is mistaken for a
+        // current picture of the disk.
+        match (
+            sweep::services::index_service::read_provenance(&store),
+            store.stats(),
+        ) {
+            (Ok(prov), Ok(stats)) => println!(
+                "\n{}",
+                sweep::ui::provenance::index_provenance(
+                    &prov,
+                    stats.total_bytes,
+                    sweep::ui::provenance::now_unix(),
+                )
+            ),
+            _ => println!("\nindex: provenance unavailable — figures may be stale or partial"),
         }
     } else if index_db_path().exists() {
         println!("\nindex: unavailable (disk full, reserve consumed — run sweep bin --empty)");
@@ -1003,21 +1030,59 @@ fn run_status(top: usize) -> Result<()> {
     Ok(())
 }
 
-fn run_index(status: bool, full: bool, roots: Vec<std::path::PathBuf>) -> Result<()> {
-    let _ = ensure_reserve();
+fn run_index(
+    status: bool,
+    full: bool,
+    compact: bool,
+    roots: Vec<std::path::PathBuf>,
+) -> Result<()> {
+    // Recreate the reserve only when there is room to spare — see `run_status`.
+    // `index --status` in particular reclaims nothing, so an unconditional create
+    // would re-occupy space a `clean` had just freed.
+    try_recreate_reserve();
     let mut store = open_store()?;
 
     if status {
         let stats = store.stats()?;
+        let prov = sweep::services::index_service::read_provenance(&store)?;
         println!("index db: {}", index_db_path().display());
         println!("files: {}", stats.files);
         println!("folders: {}", stats.dirs);
         println!("cataloged size: {}", fmt(stats.total_bytes));
         println!(
             "last run: {}",
-            store.meta_get("last_run")?.unwrap_or_else(|| "never".into())
+            sweep::ui::provenance::last_run_line(
+                prov.last_run_unix,
+                sweep::ui::provenance::now_unix()
+            )
         );
+        println!(
+            "roots: {}",
+            if prov.roots.is_empty() {
+                "not recorded".to_string()
+            } else {
+                prov.roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+        // What the figures above are a share of. `cataloged size` alone is a
+        // byte count with no denominator, which is how 11 % of a disk came to
+        // read as an answer about the whole disk.
+        println!(
+            "coverage: {}",
+            sweep::ui::provenance::coverage_line(&prov, stats.total_bytes)
+        );
+        if prov.interrupted {
+            println!("last run was interrupted — figures above are partial");
+        }
         return Ok(());
+    }
+
+    if compact {
+        return run_index_compact(store);
     }
 
     if full {
@@ -1069,6 +1134,38 @@ fn run_index(status: bool, full: bool, roots: Vec<std::path::PathBuf>) -> Result
         fmt(stats.total_bytes)
     );
 
+    Ok(())
+}
+
+/// `sweep index --compact`: hand the deleted-page freelist back to the filesystem.
+///
+/// Clear/delete only returns pages to SQLite's freelist, so the index file never
+/// shrinks on its own — on a full volume it stays a large non-reclaimable block.
+/// `VACUUM` rewrites the database into a temp file and swaps it in, so it needs
+/// free space roughly equal to the current index. That precondition is checked up
+/// front: failing with a readable number beats dying partway through the rewrite
+/// on the very disk this command is meant to help.
+fn run_index_compact(store: SqliteStore) -> Result<()> {
+    let path = index_db_path();
+    let before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let free = free_bytes_on_index_volume();
+    if free < before {
+        anyhow::bail!(
+            "not enough free space to compact: the index is {} but only {} is free on its volume.\n\
+             Free space first (`sweep clean -y`, then `sweep bin --empty` to release the Recycle Bin), \
+             or relocate the index with SWEEP_DB.",
+            fmt(before),
+            fmt(free)
+        );
+    }
+
+    store.compact()?;
+
+    let after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    println!("index db: {}", path.display());
+    println!("before: {}", fmt(before));
+    println!("after: {}", fmt(after));
+    println!("reclaimed: {}", fmt(before.saturating_sub(after)));
     Ok(())
 }
 

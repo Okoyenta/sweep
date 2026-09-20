@@ -41,14 +41,14 @@ unsigned.
 | Command | Description |
 | --- | --- |
 | `sweep` | same as `sweep status --top 10` |
-| `sweep status [--top N]` | memory/swap bars, disk usage, top RAM processes with last-run times, index stats |
-| `sweep index [--status] [--full] [roots...]` | build/resume the background file index (incremental by default) |
+| `sweep status [--top N]` | memory/swap bars, disk usage, top RAM processes with their start times, index stats + index age/coverage |
+| `sweep index [--status] [--full] [--compact] [roots...]` | build/resume the background file index (incremental by default); `--compact` runs SQLite `VACUUM` to return deleted pages to the filesystem — the index never shrinks on its own, so this is the only way to reclaim its space (needs free space roughly equal to the current index) |
 | `sweep apps [--since-days N] [--uninstall NAME]` | list installed apps (name/version/size/last-run); launch official uninstallers on Windows |
 | `sweep clean [--scan-only] [--only ids...] [-y] [--deep] [--stop-services] [--kill]` | scan and reclaim cache/temp categories (Recycle Bin / trash backed); `--deep` includes system categories (WU/DO/WinSxS/driver store), `--stop-services` stops wuauserv+bits via RAII, `--kill` detects lock-holding processes (handle-table scan on Windows, name-heuristic on Linux), shows popup and kills on confirm (`-y` skips popup) |
 | `sweep ram [--trim-top N] [--purge-standby]` | trim process working sets; purge standby list / kernel caches |
 | `sweep tui [--top N]` | live dashboard (auto-refresh 2 s; `q` quit, `r` refresh, `t` trim top-10, `p` purge standby, `b` background view, `i` idle-writer view, `↑`/`↓` select, `k` kill with confirmation) |
 | `sweep bin [--empty] [-y]` | list recycle bin contents; permanently empty it |
-| `sweep dupes [--min-mb N] [--trash-group N] [-y]` | duplicate-file groups from the index, sorted by wasted bytes |
+| `sweep dupes [--min-mb N] [--trash-group N] [-y]` | duplicate-file groups from the index, sorted by wasted bytes; prints the index's age and coverage first, so a clean negative is attributable |
 | `sweep diagnose [--deep]` | scan safe + system categories with per-category hints; `--deep` includes WU downloads, DO cache, WinSxS, driver store (risk=System) |
 | `sweep schedule --install\|--remove\|--status` | daily background re-index (schtasks / crontab) |
 | `sweep schedule --guard-install\|--guard-remove\|--guard-status` | register guard daemon on logon via scheduled task |
@@ -235,7 +235,14 @@ modules are pure std and mirror the Windows logic.
 
 - **Prefetch** is empty/disabled on some Windows installs; last-run data then
   comes from UserAssist only (Explorer-launched programs). UWP/AUMID-only
-  launches (e.g. Start-menu "Chrome") are not attributed to exes.
+  launches (e.g. Start-menu "Chrome") are not attributed to exes. This is why
+  `sweep status`'s process table shows each process's own `STARTED` time rather
+  than its exe's last launch — the launch history is unavailable for most rows.
+- **Index age and coverage** are printed by `status`, `index --status` and
+  `dupes`. Coverage is indexed bytes over the capacity of the volumes the index's
+  roots live on, and counts only readable bytes, so a full-volume index of a disk
+  with locked directories reports below 100 %. An index built before scope
+  recording says `scope not recorded` instead of guessing.
 - **Standby-list purge** requires an elevated shell (SeProfileSingleProcessPrivilege).
 - **Linux working-set trim** has no portable equivalent; use `--purge-standby`
   as root instead.
@@ -249,9 +256,14 @@ modules are pure std and mirror the Windows logic.
   is skipped (kills immediately after printing the list).
 - **`pnpm store`** uses hardlinks — sweep delegates to `pnpm store prune` instead
   of trashing.
-- **`--deep` + driver-store** reports `System` risk; reclaim requires
+- **`--deep` + winsxs** reports `System` risk; reclaim requires
   `Dism /Online /Cleanup-Image /StartComponentCleanup` (elevated) or
   `sweep clean --deep --stop-services` for WU/DO unlock.
+- **`--deep` + driver-store** is report-only and always will be: deleting package
+  directories from `FileRepository` corrupts the store. Reclaim is per-package and
+  elevated — `pnputil /enum-drivers`, then `pnputil /delete-driver <oem##.inf>
+  /uninstall`. DISM's component cleanup does **not** act on the Driver Store, so it
+  cannot reduce this figure.
 
 ## Status / roadmap
 
